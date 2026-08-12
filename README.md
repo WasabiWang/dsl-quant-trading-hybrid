@@ -1,5 +1,7 @@
 # DSL 量化交易系统
 
+> 🔗 仓库地址: https://github.com/WasabiWang/dsl-quant-trading-hybrid
+
 ![Version](https://img.shields.io/badge/version-4.6.9h-blue)
 ![Python](https://img.shields.io/badge/python-3.10+-green)
 ![License](https://img.shields.io/badge/license-MIT-orange)
