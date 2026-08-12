@@ -1,0 +1,16 @@
+[project]
+name = "dsl-quant-mcp"
+version = "0.1.0"
+description = "MCP Server for DSL Quantitative Trading System — AI-driven A-share trading platform"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0",
+]
+license = {text = "MIT"}
+
+[project.scripts]
+dsl-mcp = "dsl_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

@@ -1,0 +1,41 @@
+agents:
+  fundamental_analyst:
+    name: fundamental
+  macro_analyst:
+    llm_type: ollama
+    name: macro
+  sentiment_analyst:
+    llm_type: ollama
+    name: sentiment
+    news_hours: 24
+  technical_analyst:
+    dsl_enabled: true
+    name: technical
+debate:
+  bearish_weight: 0.5
+  bullish_weight: 0.5
+  max_rounds: 2
+fusion:
+  fundamental_weight: 0.2
+  macro_weight: 0.3
+  sentiment_weight: 0.2
+  technical_weight: 0.3
+llm:
+  deepseek:
+    v4_flash:
+      model: deepseek-v4-flash
+      role: 脚本执行/数据搬运
+    v4_pro:
+      model: deepseek-v4-pro
+      role: 深度推理/策略决策
+  default_provider: deepseek
+  ollama:
+    base_url: http://localhost:11434
+    model: qwen3.5:9b
+  openrouter:
+    api_key_env: OPENROUTER_API_KEY
+    model: qwen/qwen3.6-plus:free
+risk:
+  max_position_size: 0.1
+  stop_loss: -0.05
+  take_profit: 0.1

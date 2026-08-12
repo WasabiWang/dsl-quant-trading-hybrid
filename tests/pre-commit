@@ -1,0 +1,50 @@
+#!/bin/bash
+# DSL Harness — Git Pre-commit Hook
+# 每次git commit前自动运行快速检查
+# 安装: cp tests/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+
+echo "🔍 DSL HARNESS pre-commit check..."
+
+cd "$(git rev-parse --show-toplevel)"
+
+# 只检查已staged的Python文件是否编译通过
+STAGED_PY=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' | grep -v __pycache__ | grep -v _archive | grep -v .venv)
+
+if [ -z "$STAGED_PY" ]; then
+    echo "  ✅ 无Python文件变更"
+    exit 0
+fi
+
+# 快速编译检查
+FAILED=0
+for f in $STAGED_PY; do
+    if [ -f "$f" ]; then
+        .venv/bin/python3 -m py_compile "$f" 2>/dev/null
+        if [ $? -ne 0 ]; then
+            echo "  ❌ $f 编译失败!"
+            FAILED=1
+        fi
+    fi
+done
+
+if [ $FAILED -eq 1 ]; then
+    echo ""
+    echo "❌ Pre-commit检查失败: 有文件编译不通过"
+    echo "   修复后重试，或运行 .venv/bin/python3 tests/harness.py 查看详情"
+    exit 1
+fi
+
+# 如果修改了核心配置，运行完整harness
+CRITICAL_CHANGED=$(echo "$STAGED_PY" | grep -E "holiday_calendar|stock_pool|batch_predict|paper_trader|calibration_feedback|dynamic_threshold|morning_decision|pre_market_refresh")
+if [ -n "$CRITICAL_CHANGED" ]; then
+    echo "  ⚠️ 检测到核心文件变更，运行完整harness..."
+    .venv/bin/python3 tests/harness.py --pre-commit
+    if [ $? -ne 0 ]; then
+        echo ""
+        echo "❌ Harness检查失败: 请修复以上问题后再commit"
+        exit 1
+    fi
+fi
+
+echo "  ✅ Pre-commit检查通过"
+exit 0

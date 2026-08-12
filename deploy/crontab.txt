@@ -1,0 +1,51 @@
+# DSL v4.5.9 — 独立 crontab (替代 OpenClaw cron)
+# 部署: crontab deploy/crontab.txt
+# 验证: crontab -l
+
+DSL_ROOT=/opt/dsl-quant
+PYTHON=/usr/bin/python3
+
+# ═══════════ 凌晨 ═══════════
+# 02:10 DSL系统备份
+10 2 * * * cd $DSL_ROOT && $PYTHON scripts/backup.sh >> $DSL_ROOT/logs/backup.log 2>&1
+# 04:30 备份状态报告
+30 4 * * * cd $DSL_ROOT && $PYTHON scripts/backup_report.py >> $DSL_ROOT/logs/backup_report.log 2>&1
+
+# ═══════════ 盘前 ═══════════
+# 08:00 盘前环境验证 (周一至周五)
+0 8 * * 1-5 cd $DSL_ROOT && $PYTHON scripts/pre_market_check.py >> $DSL_ROOT/logs/pre_market.log 2>&1
+# 09:00 盘前数据刷新
+0 9 * * 1-5 cd $DSL_ROOT && $PYTHON scripts/pre_market_refresh.py >> $DSL_ROOT/logs/pre_market.log 2>&1
+# 09:20 盘前决策
+20 9 * * 1-5 cd $DSL_ROOT && $PYTHON scripts/morning_decision.py --market a --mode morning >> $DSL_ROOT/logs/morning_decision.log 2>&1
+# 09:30 交易执行
+30 9 * * 1-5 cd $DSL_ROOT && $PYTHON scripts/execute_planned_trades.py >> $DSL_ROOT/logs/execution.log 2>&1
+
+# ═══════════ 盘中监控 ═══════════
+45 9 * * 1-5 cd $DSL_ROOT && $PYTHON scripts/intraday_monitor.py --slot 0945 >> $DSL_ROOT/logs/monitor.log 2>&1
+0 11 * * 1-5 cd $DSL_ROOT && $PYTHON scripts/intraday_monitor.py --slot 1100 >> $DSL_ROOT/logs/monitor.log 2>&1
+0 14 * * 1-5 cd $DSL_ROOT && $PYTHON scripts/intraday_monitor.py --slot 1400 >> $DSL_ROOT/logs/monitor.log 2>&1
+
+# ═══════════ 收盘 ═══════════
+# 15:10 收盘日报
+10 15 * * 1-5 cd $DSL_ROOT && $PYTHON scripts/closing_daily_report.py >> $DSL_ROOT/logs/closing.log 2>&1
+# 15:40 健康检查
+40 15 * * * cd $DSL_ROOT && $PYTHON scripts/health_check.py >> $DSL_ROOT/logs/health.log 2>&1
+# 16:00 模型训练
+0 16 * * 1-5 cd $DSL_ROOT && $PYTHON scripts/batch_train.py >> $DSL_ROOT/logs/train.log 2>&1
+# 17:00 个股预测
+0 17 * * 1-5 cd $DSL_ROOT && $PYTHON scripts/batch_predict.py >> $DSL_ROOT/logs/predict.log 2>&1
+
+# ═══════════ 夜间 ═══════════
+# 20:00 自我反思
+0 20 * * 0-4 cd $DSL_ROOT && $PYTHON scripts/self_reflection.py >> $DSL_ROOT/logs/reflect.log 2>&1
+# 21:00 黑天鹅复盘
+0 21 * * 0-4 cd $DSL_ROOT && $PYTHON scripts/blackswan_review.py >> $DSL_ROOT/logs/blackswan.log 2>&1
+# 21:30 盘前交易预案
+30 21 * * 0-4 cd $DSL_ROOT && $PYTHON scripts/morning_decision.py --market a --mode evening >> $DSL_ROOT/logs/plan.log 2>&1
+
+# ═══════════ 周期 ═══════════
+# 周六 09:00 周度复盘
+0 9 * * 6 cd $DSL_ROOT && $PYTHON scripts/weekly_review.py >> $DSL_ROOT/logs/weekly.log 2>&1
+# 周六 09:30 股票池刷新
+30 9 * * 6 cd $DSL_ROOT && $PYTHON scripts/sync_stock_pool.py >> $DSL_ROOT/logs/pool_sync.log 2>&1

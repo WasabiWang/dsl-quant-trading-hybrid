@@ -1,0 +1,103 @@
+/* ══════════════════════════════════════════════════════════════
+   DSL Dashboard — 风险/仓位页专用样式 (v4.6.9c)
+   信息架构: 风险横幅 → 决策双栏(风险矩阵+融合仓位) → LPPL → 时间轴
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── 1. 顶部风险横幅 (全局第一眼) ── */
+.bs-hero {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; padding: 14px 20px; border-radius: 14px;
+  background: linear-gradient(135deg, rgba(255,71,87,.12), rgba(255,71,87,.04));
+  border: 1px solid rgba(255,71,87,.35);
+  margin-bottom: var(--gap);
+}
+.bs-hero-left { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.bs-hero-icon { font-size: 34px; }
+.bs-hero-title { font-size: 16px; font-weight: 700; color: var(--text); }
+.bs-hero-sub { font-size: 11px; color: var(--text2); margin-top: 2px; }
+.bs-hero-right { display: flex; align-items: center; gap: 20px; flex-shrink: 0; }
+.bs-hero-metric { text-align: right; }
+.bs-hero-metric .v { font-size: 24px; font-weight: 700; line-height: 1.1; }
+.bs-hero-metric .l { font-size: 10px; color: var(--text3); }
+.bs-hero-metric .v.crit { color: var(--danger); }
+.bs-hero-metric .v.warn { color: #ff6b35; }
+.bs-hero-metric .v.ok { color: var(--success); }
+
+/* ── 2. 决策双栏布局 ── */
+.bs-decision-row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); margin-bottom: var(--gap); }
+@media (max-width: 900px) { .bs-decision-row { grid-template-columns: 1fr; } }
+
+/* ── 2a. 左: 8因子风险矩阵 ── */
+.bs-matrix-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+.bs-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.bs-card-head h3 { margin: 0; font-size: 14px; }
+.bs-card-head .tag { font-size: 10px; padding: 2px 8px; border-radius: 10px; }
+.bs-factor-list { display: flex; flex-direction: column; gap: 7px; }
+.bs-factor-row { display: grid; grid-template-columns: 72px 1fr 34px; align-items: center; gap: 8px; }
+.bs-factor-name { font-size: 11px; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bs-factor-track { height: 10px; background: var(--bg3); border-radius: 5px; overflow: hidden; position: relative; }
+.bs-factor-fill { height: 100%; border-radius: 5px; transition: width .5s ease; }
+.bs-factor-val { font-size: 11px; font-weight: 600; text-align: right; color: var(--text); }
+.bs-factor-detail { grid-column: 2 / 4; font-size: 9px; color: var(--text3); margin-top: -3px; }
+.bs-factor-score-high { background: linear-gradient(90deg, rgba(255,71,87,.75), rgba(255,71,87,.95)); }
+.bs-factor-score-mid { background: linear-gradient(90deg, rgba(245,158,11,.65), rgba(245,158,11,.9)); }
+.bs-factor-score-low { background: linear-gradient(90deg, rgba(0,212,170,.55), rgba(0,212,170,.85)); }
+
+/* ── 2b. 右: 融合仓位决策卡 ── */
+.bs-pos-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 14px; padding: 16px; display: flex; flex-direction: column; }
+.bs-pos-main { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; }
+.bs-pos-big { font-size: 44px; font-weight: 800; line-height: 1; }
+.bs-pos-big .pct { font-size: 18px; font-weight: 600; }
+.bs-pos-label { font-size: 12px; color: var(--text2); }
+.bs-pos-bar-wrap { height: 10px; background: var(--bg3); border-radius: 6px; overflow: hidden; margin-bottom: 14px; }
+.bs-pos-bar-fill { height: 100%; border-radius: 6px; transition: width .5s ease; }
+.bs-breakdown { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.bs-bd-row { display: grid; grid-template-columns: 64px 1fr 34px; align-items: center; gap: 8px; }
+.bs-bd-name { font-size: 11px; color: var(--text2); }
+.bs-bd-track { height: 8px; background: var(--bg3); border-radius: 4px; overflow: hidden; }
+.bs-bd-fill { height: 100%; border-radius: 4px; }
+.bs-bd-val { font-size: 11px; font-weight: 600; text-align: right; }
+.bs-formula-note { font-size: 9px; color: var(--text3); margin-bottom: 10px; line-height: 1.5; }
+.bs-rationale { font-size: 11px; color: var(--text); background: var(--bg3); border-left: 3px solid var(--accent); border-radius: 6px; padding: 8px 10px; line-height: 1.6; margin-bottom: 12px; }
+.bs-recs { display: flex; flex-direction: column; gap: 5px; }
+.bs-rec { font-size: 10px; color: var(--text2); background: var(--bg3); border-radius: 6px; padding: 5px 8px; }
+.bs-rec::before { content: "• "; color: var(--accent); }
+
+/* ── 3. LPPL 深度诊断 ── */
+.bs-lppl-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 14px; padding: 16px; margin-bottom: var(--gap); }
+.bs-lppl-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-top: 10px; }
+.bs-lppl-item { background: var(--bg3); border-radius: 10px; padding: 10px 12px; border-left: 3px solid var(--border); }
+.bs-lppl-item.crit { border-left-color: var(--danger); }
+.bs-lppl-item.high { border-left-color: #ff6b35; }
+.bs-lppl-item.normal { border-left-color: var(--success); }
+.bs-lppl-item h4 { margin: 0 0 6px; font-size: 12px; }
+.bs-lppl-metrics { display: flex; gap: 12px; font-size: 11px; color: var(--text2); flex-wrap: wrap; }
+.bs-lppl-metrics b { color: var(--text); }
+.bs-lppl-extra { font-size: 9px; color: var(--text3); margin-top: 4px; }
+.bs-lppl-rec { font-size: 10px; color: var(--accent); margin-top: 4px; }
+.bs-sector-signals { margin-top: 14px; }
+.bs-sector-signals h4 { font-size: 12px; margin: 0 0 8px; }
+.bs-sector-item { display: flex; align-items: center; gap: 10px; background: rgba(245,158,11,.05); border-radius: 8px; padding: 6px 10px; margin-bottom: 4px; font-size: 11px; }
+.bs-sector-name { font-weight: 600; }
+.bs-sector-dir { font-size: 10px; }
+.bs-sector-dir.up { color: var(--danger); }   /* A股惯例: 涨=红 */
+.bs-sector-dir.down { color: var(--success); }
+.bs-sector-conf { font-size: 9px; color: var(--text3); }
+.bs-sector-stocks { font-size: 9px; color: var(--text3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── 4. 仓位风险分布 (持仓表) ── */
+.bs-positions-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 14px; padding: 16px; margin-bottom: var(--gap); }
+.bs-positions-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.bs-positions-table th { text-align: left; font-size: 10px; color: var(--text3); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.bs-positions-table td { padding: 6px 8px; border-bottom: 1px solid var(--bg3); }
+.bs-positions-table tr:hover td { background: var(--bg3); }
+
+/* ── 5. 风险时间轴 ── */
+.bs-timeline-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+.bs-timeline-svg { width: 100%; height: auto; display: block; }
+.bs-timeline-legend { display: flex; gap: 16px; font-size: 10px; color: var(--text2); margin-top: 8px; }
+.bs-timeline-legend .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+
+/* ── 空状态 & 工具 ── */
+.bs-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 32px; color: var(--text3); font-size: 12px; }
+.bs-empty .icon { font-size: 28px; margin-bottom: 8px; }

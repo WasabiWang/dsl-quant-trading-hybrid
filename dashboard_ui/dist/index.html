@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DSL Quant Pro Terminal</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <style>
+        body { background-color: #020617; color: #e2e8f0; font-family: 'Inter', sans-serif; }
+        .glass-panel { background: rgba(15, 23, 42, 0.9); backdrop-filter: blur(12px); border: 1px solid rgba(51, 65, 85, 0.5); }
+        .timeline-line { position: absolute; left: 15px; top: 0; bottom: 0; width: 2px; background: #1e293b; z-index: 0; }
+    </style>
+</head>
+<body class="h-screen overflow-hidden">
+    <div id="app" class="h-full flex flex-col">
+        
+        <!-- 顶部：专业绩效与指数看板 -->
+        <header class="h-28 glass-panel flex flex-col justify-center px-6 border-b border-slate-800 shrink-0">
+            <div class="flex justify-between items-center mb-3">
+                <div class="flex items-center space-x-3">
+                    <h1 class="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-emerald-400">DSL Quant Pro</h1>
+                    <span class="text-[10px] text-slate-500 border border-slate-700 px-1.5 rounded">{{ data.version }}</span>
+                </div>
+                <div class="text-xs text-slate-500">{{ data.timestamp }}</div>
+            </div>
+            
+            <div class="grid grid-cols-4 gap-6 text-sm">
+                <!-- 指数行情 -->
+                <div class="flex space-x-6 border-r border-slate-700 pr-4">
+                    <div class="text-center">
+                        <p class="text-slate-500 text-[10px]">上证指数</p>
+                        <p class="font-mono font-bold text-base">{{ data.indices?.sh?.price || '-' }}</p>
+                        <p class="text-xs font-mono" :class="data.indices?.sh?.change >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ data.indices?.sh?.change >= 0 ? '+' : '' }}{{ data.indices?.sh?.change }}%</p>
+                    </div>
+                    <div class="text-center">
+                        <p class="text-slate-500 text-[10px]">恒生指数</p>
+                        <p class="font-mono font-bold text-base">{{ data.indices?.hsi?.price || '-' }}</p>
+                        <p class="text-xs font-mono" :class="data.indices?.hsi?.change >= 0 ? 'text-emerald-400' : 'text-red-400'">{{ data.indices?.hsi?.change >= 0 ? '+' : '' }}{{ data.indices?.hsi?.change }}%</p>
+                    </div>
+                </div>
+
+                <!-- 实习绩效 (Alpha) -->
+                <div class="flex space-x-6 border-r border-slate-700 pr-4">
+                    <div class="text-center">
+                        <p class="text-slate-500 text-[10px]">A股实习收益 (Alpha)</p>
+                        <p class="font-mono font-bold text-base text-blue-400">{{ data.performance?.a_share_return }}% <span class="text-xs text-slate-500">(+{{ data.performance?.a_share_alpha }}%)</span></p>
+                    </div>
+                    <div class="text-center">
+                        <p class="text-slate-500 text-[10px]">港股实习收益 (Alpha)</p>
+                        <p class="font-mono font-bold text-base text-emerald-400">{{ data.performance?.hk_share_return }}% <span class="text-xs text-slate-500">(+{{ data.performance?.hk_share_alpha }}%)</span></p>
+                    </div>
+                </div>
+
+                <!-- 核心指标 -->
+                <div class="flex space-x-6 border-r border-slate-700 pr-4">
+                    <div class="text-center">
+                        <p class="text-slate-500 text-[10px]">胜率 / 盈亏比</p>
+                        <p class="font-mono font-bold text-base">{{ data.performance?.win_rate }}% / {{ data.performance?.profit_factor }}</p>
+                    </div>
+                    <div class="text-center">
+                        <p class="text-slate-500 text-[10px]">模拟总资产</p>
+                        <p class="font-mono font-bold text-base">¥{{ (data.performance?.total_assets || 0).toLocaleString() }}</p>
+                    </div>
+                </div>
+
+                <!-- 宏观风险 -->
+                <div class="text-center">
+                    <p class="text-slate-500 text-[10px]">宏观风险指数</p>
+                    <p class="font-mono font-bold text-base text-yellow-400">2.5 / 10</p>
+                </div>
+            </div>
+        </header>
+
+        <div class="flex flex-1 overflow-hidden">
+            <!-- 左侧：全流程事件流 -->
+            <aside class="w-72 glass-panel border-r border-slate-800 p-5 overflow-y-auto shrink-0">
+                <h3 class="text-xs font-semibold text-slate-400 mb-6 uppercase tracking-widest">交易全流程监控</h3>
+                <div class="relative pl-4">
+                    <div class="timeline-line"></div>
+                    <div v-for="(task, index) in data.tasks" :key="index" class="mb-6 relative z-10">
+                        <div class="w-3 h-3 rounded-full border-2" :class="task.status === 'completed' ? 'bg-emerald-500 border-emerald-500' : 'bg-slate-900 border-slate-600'"></div>
+                        <p class="text-[10px] text-slate-500 mb-0.5">{{ task.time }}</p>
+                        <p class="text-sm font-medium" :class="task.status === 'completed' ? 'text-slate-200' : 'text-slate-500'">{{ task.type }}</p>
+                        <p class="text-[10px] mt-1" :class="task.status === 'error' ? 'text-red-400' : 'text-emerald-400'">{{ task.status === 'completed' ? '✅ ' + task.summary : task.summary }}</p>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- 中间：决策报告中心 -->
+            <main class="flex-1 p-8 overflow-y-auto bg-slate-950">
+                <h2 class="text-lg font-semibold text-white mb-6">今日决策报告详情</h2>
+                <div class="space-y-4">
+                    <div v-for="report in data.tasks" class="glass-panel p-5 rounded-lg border-l-4 border-blue-500 hover:bg-slate-900 transition">
+                        <div class="flex justify-between items-center mb-2">
+                            <span class="text-xs font-bold text-slate-300">{{ report.type }}</span>
+                            <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-400">{{ report.time }}</span>
+                        </div>
+                        <p class="text-sm text-slate-200 leading-relaxed font-mono text-xs">{{ report.summary }}</p>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script>
+        const { createApp } = Vue;
+        createApp({
+            data() { return { data: { tasks: [], indices: {}, performance: {} } } },
+            mounted() { this.fetchData(); setInterval(this.fetchData, 10000); },
+            methods: {
+                async fetchData() {
+                    try {
+                        const res = await axios.get('http://localhost:8000/api/dashboard');
+                        this.data = res.data;
+                    } catch (e) { console.log("Connecting..."); }
+                }
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>

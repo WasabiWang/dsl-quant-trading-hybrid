@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  dashboard:
+    build: .
+    container_name: dsl-dashboard
+    ports:
+      - "8888:8888"
+    volumes:
+      - dsl_data:/app/data
+      - dsl_models:/app/models
+      - dsl_cache:/app/cache
+      - ./config:/app/config:ro
+      - ./confidence_data:/app/confidence_data:ro
+    environment:
+      - FEISHU_APP_ID=${FEISHU_APP_ID:-}
+      - FEISHU_APP_SECRET=${FEISHU_APP_SECRET:-}
+      - FEISHU_RECEIVE_USER=${FEISHU_RECEIVE_USER:-}
+    restart: unless-stopped
+
+volumes:
+  dsl_data:
+  dsl_models:
+  dsl_cache:

@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.git/
+_archive/
+venv/
+.venv/
+models/*.pkl
+data/paper_trading.db
+cache/*.json
+logs/
+*.log
+.env
+.env.local

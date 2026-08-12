@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DSL量化交易系统 v4.6.7</title>
+<link rel="stylesheet" href="/static/design-system.css?v=20260606">
+<link rel="stylesheet" href="/static/blackswan.css?v=20260801">
+</head>
+<body>
+
+<div class="app">
+  <!-- Sidebar -->
+  <nav class="sidebar">
+    <div class="logo" title="DSL量化交易系统">📊</div>
+    <div class="nav-item active" data-tab="overview" title="总览">🏠</div>
+    <div style="font-size:8px;color:var(--text3);letter-spacing:.3px;margin-top:-2px;margin-bottom:2px">总览</div>
+    <div class="nav-item" data-tab="predictions" title="预测/筛选">🎯</div>
+    <div style="font-size:8px;color:var(--text3);letter-spacing:.3px;margin-top:-2px;margin-bottom:2px">预测</div>
+    <div class="nav-item" data-tab="models" title="模型">🧠</div>
+    <div style="font-size:8px;color:var(--text3);letter-spacing:.3px;margin-top:-2px;margin-bottom:2px">模型</div>
+    <div class="nav-item" data-tab="progress" title="进度/管道">⏱️</div>
+    <div style="font-size:8px;color:var(--text3);letter-spacing:.3px;margin-top:-2px;margin-bottom:2px">进度</div>
+    <div class="nav-item" data-tab="blackswan" title="黑天鹅">🦢<span class="badge" id="bs-badge" style="display:none"></span></div>
+    <div style="font-size:8px;color:var(--text3);letter-spacing:.3px;margin-top:-2px;margin-bottom:2px">风险/仓位</div>
+    <div class="nav-item" data-tab="paper-trader" title="模拟交易">📈<span class="badge" id="pt-badge" style="display:none"></span></div>
+    <div style="font-size:8px;color:var(--text3);letter-spacing:.3px;margin-top:-2px;margin-bottom:2px">交易</div>
+  </nav>
+
+  <!-- Main -->
+  <main class="main">
+    <!-- Header -->
+    <div class="header">
+      <div>
+        <h1>DSL量化交易系统 <span class="version-badge" id="version-badge">v4.6.7</span></h1>
+        <div class="sub" id="header-sub">加载中... <span id="last-refresh" style="margin-left:8px;font-size:10px;color:var(--text3)"></span></div>
+      </div>
+      <div class="header-right">
+        <span id="health-dot" class="status-dot green"></span>
+        <span id="health-label" class="header-right-text">运行中</span>
+        <button onclick="refreshAll()" class="header-btn">🔄 刷新</button>
+      </div>
+    </div>
+
+    <!-- Black Swan Banner -->
+    <div id="bs-banner" style="display:none"></div>
+
+    <!-- Tab: 总览 -->
+    <div class="section active" id="section-overview">
+      <div class="row" id="ov-cards">
+        <div class="card card-sm skeleton-card"><h3>📊 信号</h3><div class="skeleton skeleton-value"></div><div class="skeleton skeleton-text short"></div></div>
+        <div class="card card-sm skeleton-card"><h3>🏛️ 股票池</h3><div class="skeleton skeleton-value"></div><div class="skeleton skeleton-text short"></div></div>
+        <div class="card card-sm skeleton-card"><h3>📈 持仓</h3><div class="skeleton skeleton-value"></div><div class="skeleton skeleton-text short"></div></div>
+        <div class="card card-sm skeleton-card"><h3>🎯 夏普</h3><div class="skeleton skeleton-value"></div><div class="skeleton skeleton-text short"></div></div>
+        <div class="card card-sm skeleton-card"><h3>⚡ 回撤</h3><div class="skeleton skeleton-value"></div><div class="skeleton skeleton-text short"></div></div>
+        <div class="card card-sm skeleton-card"><h3>⚠️ 黑天鹅</h3><div class="skeleton skeleton-value"></div><div class="skeleton skeleton-text short"></div></div>
+      </div>
+      <div class="row" id="ov-quick-row">
+        <div class="card" style="flex:1;min-width:220px"><h3>⚠️ 风险预警</h3><div id="ov-risk"><div class="empty-state"><div class="empty-icon">⏳</div>加载中...</div></div></div>
+        <div class="card" style="flex:1;min-width:220px"><h3>🔬 模型健康度</h3><div id="ov-model-health"><div class="empty-state"><div class="empty-icon">⏳</div>加载中...</div></div></div>
+        <div class="card" style="flex:1;min-width:220px"><h3>📈 绩效总览</h3><div id="ov-perf"><div class="empty-state"><div class="empty-icon">⏳</div>加载中...</div></div></div>
+      </div>
+      <div class="row" id="ov-analytics-row">
+        <div class="card" id="ov-trend-card" style="flex:1.5;min-width:320px"><h3>📈 精度趋势</h3><div id="ov-trend"><div class="empty-state"><div class="empty-icon">⏳</div>交易日后将自动积累兑现数据</div></div></div>
+        <div class="card" id="ov-attribution-card" style="flex:1;min-width:240px"><h3>🎯 绩效归因</h3><div id="ov-attribution"><div class="empty-state"><div class="empty-icon">⏳</div>积累交易数据...</div></div></div>
+      </div>
+    </div>
+
+    <!-- Tab: 预测/筛选 -->
+    <div class="section" id="section-predictions">
+      <div class="row" style="align-items:center;margin-bottom:var(--gap);flex-wrap:wrap">
+        <div class="tabs" id="pred-tabs" style="margin:0">
+          <div class="tab active" data-sub="all">全部</div>
+          <div class="tab" data-sub="buy">🟢 买入</div>
+          <div class="tab" data-sub="sell">🔴 卖出</div>
+          <div class="tab" data-sub="hold">⚪ 持有</div>
+        </div>
+        <span class="signal-legend" title="A股惯例：红涨绿跌">A股惯例 <span class="sl-dot buy"></span> 涨/买 <span class="sl-dot sell"></span> 跌/卖</span>
+        <div style="flex:1;min-width:12px"></div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <select id="scr-tier" onchange="renderPredictions(DATA)" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:8px;font-size:12px">
+            <option value="">全部 Tier</option>
+            <option value="alpha">⚡ α池</option>
+            <option value="core">🔬 核心</option>
+            <option value="bench">📊 基准</option>
+          </select>
+          <select id="scr-score" onchange="renderPredictions(DATA)" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:8px;font-size:12px">
+            <option value="">不限 基本面SCORE</option>
+            <option value="7">≥7 强烈推荐</option>
+            <option value="6">≥6 推荐</option>
+            <option value="5">≥5 中性</option>
+          </select>
+          <select id="flt-conf" onchange="renderPredictions(DATA)" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:8px;font-size:12px">
+            <option value="">置信度</option>
+            <option value="0.7">≥ 70%</option>
+            <option value="0.8">≥ 80%</option>
+            <option value="0.9">≥ 90%</option>
+          </select>
+          <select id="flt-h5d" onchange="renderPredictions(DATA)" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:8px;font-size:12px">
+            <option value="">H5D精度%</option>
+            <option value="0.5">≥ 50%</option>
+            <option value="0.55">≥ 55%</option>
+            <option value="0.6">≥ 60%</option>
+          </select>
+          <select id="flt-h20d" onchange="renderPredictions(DATA)" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:8px;font-size:12px">
+            <option value="">H20D精度%</option>
+            <option value="0.5">≥ 50%</option>
+            <option value="0.55">≥ 55%</option>
+            <option value="0.6">≥ 60%</option>
+          </select>
+          <select id="flt-ret" onchange="renderPredictions(DATA)" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:8px;font-size:12px">
+            <option value="">H5D预变%</option>
+            <option value="0.01">≥ +1%</option>
+            <option value="0.02">≥ +2%</option>
+            <option value="-0.01">≤ -1%</option>
+            <option value="-0.02">≤ -2%</option>
+          </select>
+          <select id="flt-h20d-ret" onchange="renderPredictions(DATA)" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:8px;font-size:12px">
+            <option value="">H20D预变%</option>
+            <option value="0.01">≥ +1%</option>
+            <option value="0.02">≥ +2%</option>
+            <option value="-0.01">≤ -1%</option>
+            <option value="-0.02">≤ -2%</option>
+          </select>
+          <span id="pred-count" style="font-size:12px;color:var(--text2);min-width:60px;text-align:right"></span>
+        <span id="pred-freshness" class="data-freshness"></span>
+        </div>
+      </div>
+      <div class="card" style="overflow:hidden">
+        <div class="table-wrap" id="pred-table-wrap"><table id="pred-table"><thead><tr><th>代码</th><th>名称</th><th>概念</th><th>层级</th><th>权重</th><th>基本面SCORE</th><th>信号</th><th>置信度</th><th>H5D预变%</th><th>H20D预变%</th><th>H5D精度%</th><th>H20D精度%</th><th>来源</th></tr></thead><tbody></tbody></table></div>
+        <details style="margin-top:12px;cursor:pointer" id="pred-legend">
+        <summary style="font-size:12px;color:var(--text2);padding:4px 0">📖 栏位公式与关系</summary>
+        <div style="font-size:11px;color:var(--text2);line-height:1.7;padding:8px 0;max-width:900px">
+        <div style="margin-bottom:14px;padding:10px 12px;background:var(--bg3);border-radius:8px;border-left:3px solid var(--accent)">
+        <div style="font-weight:600;color:var(--text);margin-bottom:6px">📐 信号生成流程</div>
+        <div style="font-family:monospace;font-size:9px;color:var(--text2)">
+        LGBM + XGBoost + CatBoost 集成 → <b style="color:var(--success)">H5D预变%</b>(5日涨跌幅)<br>
+        → compute_h5d_signal(ret, accuracy) → <b style="color:var(--accent)">信号</b> + <b style="color:var(--accent)">置信度</b><br>
+        → H5D × H20D 交叉确认 → 方向冲突强制HOLD<br>
+        → 动态阈值过滤 → <b style="color:var(--accent)">confidence_level</b>
+        </div></div>
+        </div>
+        </details>
+      </div>
+    </div>
+
+    <!-- Tab: 模型 -->
+    <div class="section" id="section-models">
+      <div class="row" id="model-summary">
+        <div class="card card-sm"><h3>📊 总标的</h3><div class="skeleton skeleton-value"></div></div>
+        <div class="card card-sm"><h3>🔴 急迫重训</h3><div class="skeleton skeleton-value"></div></div>
+        <div class="card card-sm"><h3>🟡 计划重训</h3><div class="skeleton skeleton-value"></div></div>
+        <div class="card card-sm"><h3>🟢 正常</h3><div class="skeleton skeleton-value"></div></div>
+      </div>
+      <div class="card">
+        <div class="tabs" id="model-tabs">
+          <div class="tab active" data-sub="all">全部</div>
+          <div class="tab" data-sub="urgent">🔴 急迫重训</div>
+          <span id="model-freshness" class="data-freshness" style="margin-left:auto"></span>
+          <div class="tab" data-sub="planned">🟡 计划重训</div>
+        </div>
+        <div class="table-wrap"><table id="model-table"><thead><tr><th>代码</th><th>名称</th><th>H5D精度</th><th>H20D精度</th><th>状态</th><th>精度样本</th><th>H5D对</th><th>训练时间</th><th>操作</th><th>精度走势</th></tr></thead><tbody></tbody></table></div>
+      </div>
+    </div>
+
+    <!-- Tab: 进度 / Pipeline Timeline -->
+    <div class="section" id="section-progress">
+      <div class="pipeline-stats" id="pl-stats"></div>
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <h3 style="margin:0">⏱️ 全流程时序</h3>
+          <span style="font-size:11px;color:var(--text2)">点击任务查看历史报告</span>
+        </div>
+        <div class="pipeline-wrapper" id="pipeline-timeline">
+          <div class="empty-state"><div class="empty-icon">⏳</div>加载时序数据...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab: 风险/仓位 (黑天鹅) -->
+    <div class="section" id="section-blackswan">
+      <!-- 区域0: 顶部风险横幅 -->
+      <div id="bs-hero"><div class="bs-empty"><div class="icon">⏳</div>加载风险状态...</div></div>
+      <!-- 区域1+2: 决策双栏 (左: 因子矩阵 | 右: 融合仓位) -->
+      <div class="bs-decision-row">
+        <div id="bs-risk-matrix"><div class="bs-empty"><div class="icon">⏳</div>加载风险矩阵...</div></div>
+        <div id="bs-pos-card"><div class="bs-empty"><div class="icon">⏳</div>加载仓位决策...</div></div>
+      </div>
+      <!-- 区域3: LPPL深度检测 -->
+      <div id="bs-lppl-deep" style="display:none"></div>
+      <!-- 区域4: 仓位风险分布 -->
+      <div id="bs-position-risk"><div class="bs-empty"><div class="icon">📋</div>加载仓位数据...</div></div>
+      <!-- 区域5: 风险时间轴 -->
+      <div id="bs-risk-timeline"><div class="bs-empty"><div class="icon">⏳</div>加载风险历史...</div></div>
+    </div>
+
+    <!-- Tab: 模拟交易 -->
+    <div class="section" id="section-paper-trader">
+      <div class="row" id="pt-summary">
+        <div class="card card-sm"><h3>💰 总资产</h3><div class="skeleton skeleton-value"></div></div>
+        <div class="card card-sm"><h3>📊 总盈亏</h3><div class="skeleton skeleton-value"></div></div>
+        <div class="card card-sm"><h3>📈 持仓市值</h3><div class="skeleton skeleton-value"></div></div>
+        <div class="card card-sm"><h3>💵 现金</h3><div class="skeleton skeleton-value"></div></div>
+        <div class="card card-sm"><h3>📦 持仓数</h3><div class="skeleton skeleton-value"></div></div>
+      </div>
+      <div class="card" style="margin-bottom:16px" id="pt-stop-loss-card" hidden>
+        <h3 style="margin-bottom:8px">🛡️ 止损监控 <span id="pt-sl-status-badge"></span></h3>
+        <div id="pt-stop-loss-body" style="font-size:13px"></div>
+      </div>
+      <div class="card">
+        <h3 style="margin-bottom:12px">📦 当前持仓</h3>
+        <div class="table-wrap"><table id="pt-positions-table"><thead><tr><th>代码</th><th>名称</th><th>数量</th><th>成本</th><th>现价</th><th>市值</th><th>盈亏</th><th>盈亏%</th><th>仓位%</th><th>止损线</th></tr></thead><tbody></tbody></table></div>
+      </div>
+      <div class="card">
+        <h3 style="margin-bottom:12px">📜 交易记录</h3>
+        <div class="table-wrap"><table id="pt-history-table"><thead><tr><th>时间</th><th>代码</th><th>方向</th><th>价格</th><th>数量</th><th>金额</th><th>费用</th><th>原因</th></tr></thead><tbody></tbody></table></div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- Trend Tooltip -->
+<div class="trend-tooltip" id="trend-tooltip"></div>
+<!-- 脚本: 公共逻辑 + 风险/仓位页渲染 (v4.6.9c 拆分) -->
+<script src="/static/app.js?v=20260801"></script>
+<script src="/static/blackswan.js?v=20260801"></script>
+</body>
+</html>

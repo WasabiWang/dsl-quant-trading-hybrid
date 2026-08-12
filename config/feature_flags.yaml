@@ -1,0 +1,57 @@
+# DSL v4.5.18 — 功能开关
+# 控制 LLM / OpenClaw / 外部依赖的启用/禁用
+#
+# 独立部署: 全部设为 false, 系统以纯 Python + crontab 运行
+# 增强模式: 启用 llm.* 功能, 获得 AI 辅助分析
+# 调试模式: 启用 debug.* 功能, 调用 Claude Code 进行修复
+
+# ═══════════ LLM 功能 (全可选) ═══════════
+llm:
+  enabled: false               # LLM 全局开关
+  sentiment_analysis: false    # 新闻情绪分析 (回退: 关键词匹配)
+  dual_agent_verification: false  # 双Agent交叉验证
+  strategy_generation: false   # LLM生成策略代码
+  macro_analysis: false        # 宏观环境分析
+  fallback: "rule_based"       # LLM不可用时的回退策略
+
+# ═══════════ OpenClaw 替代 ═══════════
+scheduler:
+  provider: "openclaw"         # crontab | openclaw (v4.5.18: 切换至OpenClaw调度器)
+  crontab_path: "cron/crontab.conf"  # Legacy crontab (已过期, 参考cron/OPENCLAW_SCHEDULER.md)
+
+notification:
+  provider: "feishu_direct"    # feishu_direct | openclaw_cli
+  feishu_app_id: "${FEISHU_APP_ID}"
+  feishu_app_secret: "${FEISHU_APP_SECRET}"
+
+# ═══════════ Claude Code 接口 (仅调试/修复/改进) ═══════════
+claude_code:
+  mode: "mcp"                  # MCP Server 接口
+  mcp_server: "mcp_server/dsl_mcp/server.py"
+  permissions:
+    - read_data                # 读取行情/预测/持仓
+    - run_backtest             # 运行回测验证
+    - trigger_retrain          # 触发重训练
+    - suggest_improvements     # 建议改进方案
+    - diagnose_issues          # 诊断系统问题
+  restricted:
+    - modify_config            # 禁止修改配置
+    - delete_data              # 禁止删除数据
+
+# ═══════════ v4.6.x: 实盘交易开关 ═══════════
+live_trading:
+  enabled: false               # 全局实盘开关 (true=使用broker, false=paper trader)
+  broker: xtquant              # 券商: xtquant | easytrader
+  dry_run_first: true          # 首次必须dry_run (只记录不执行)
+  max_single_pct: 0.15         # 单笔最大仓位 15%
+  max_daily_pct: 0.50          # 日累计最大仓位 50%
+  require_ack: true            # 需要 data/live_trading_ack 确认文件
+  notify_on_fill: true         # 成交后飞书通知
+
+# ═══════════ 数据源 ═══════════
+data_sources:
+  akshare: true                # 东方财富 (免费, 主用)
+  efinance: true               # efinance (免费, 备用)
+  tushare: false               # Tushare Pro (付费)
+  mairui: true                 # 麦蕊API (基本面)
+  yfinance: true               # Yahoo Finance (港股/美股)

@@ -1,0 +1,190 @@
+# 缓存文件
+cache/
+*.cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 测试和临时文件
+*.log
+*.json
+*.bak
+*.tmp
+*.temp
+test_*.py
+temp_*
+demo_*
+
+# 性能测试报告
+performance_benchmark_*.json
+error_report_*.json
+integration_report_*.json
+batch_backtest_results_*.json
+
+# 策略仓库数据
+strategies/repo/
+
+# IDE文件
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 虚拟环境
+venv/
+env/
+.venv/
+
+# 日志文件
+logs/
+*.log
+dsl_errors.log
+
+# 个人配置文件
+.env
+.env.local
+.env.*.local
+
+# 生成的文件
+llm_strategy_generation_report.json
+strategy_import_report.json
+strategy_catalog.md
+
+# 模型文件 (生成, 每次训练变化)
+*.pkl
+*.pkl.*
+
+# 数据库文件
+*.db
+*.db-*
+
+# 备份目录
+backups/
+
+# 浮动数据JSON (自动生成, 变动的, 不应追踪)
+data/execution_log.json
+data/cron_status.json
+data/retrain_queue.json
+data/circuit_breaker.json
+data/paper_trading_ledger.json
+data/simulation_portfolio.json
+data/simulation_state.json
+data/feedback_log.jsonl
+data/execution_log.jsonl
+confidence_data/*.json
+cache/price_*.json
+
+# 测试产物
+/web_dashboard/.dashboard.pid
+feishu_token2.txt
+# Local backup files
+/data/backups/
+/backup/
+
+# Cache and temporary files
+/cache/pre_market/
+/cache/progress/
+/cache/reports/
+/cache/*.json
+
+# Model artifacts (too large for git)
+/models/pool/
+/catboost_info/
+
+# Environment and secrets
+.env
+.env.local
+.env.independent
+
+# IDE and OS files
+.DS_Store
+*.swp
+*.swo
+*~
+*.npy
+
+# ===== Public repo exclusions (2026-08-12) =====
+# 内部报告(保留本地, 不推送)
+A500_TEST_SUMMARY.md
+ARCHIVE.md
+COMPLETE_CRON_LIST.md
+CRON_FIX_SUMMARY.md
+CRON_TASK_LIST.md
+CURRENT_CRON_TASKS.md
+DASHBOARD_AND_PERFORMANCE_REPORT.md
+DASHBOARD_AVAILABILITY_REPORT.md
+DEPLOYMENT_COMPLETE_REPORT.md
+DEPLOYMENT_FINAL_SUMMARY.md
+DOCUMENT_FIXED.md
+ENHANCEMENT_SUMMARY.md
+FINAL_STATUS_REPORT.md
+FIX_SUMMARY.md
+INTEGRATION_SUMMARY.md
+MEMORY.md
+OPTIMIZATION_SUMMARY.md
+PRODUCTION_CONFIG.md
+PRODUCTION_DEPLOYMENT_SUMMARY.md
+QUICK_START_ENHANCED.md
+QUICK_START_GUIDE.md
+REALTIME_MONITOR_ANALYSIS.md
+STABILITY_ENHANCEMENT_REPORT.md
+SYNC_COMPLETE.md
+TASK_CANCELLATION_RECORD.md
+TASK_CONFLICT_ANALYSIS.md
+deploy_stable_sdk_*.md
+deploy_summary.md
+deployment_report_*.md
+quality_report_*.md
+strategy_catalog.md
+
+# 内部目录
+.archon/
+_archive/
+web_dashboard/backup_*/
+docs/cloudflare_access_setup.md
+docs/report_framework_guide.md
+
+# 策略核心配置(股票池/参数不公开, 提供example模板)
+config/master_stock_pool.yaml
+config/shadow_pool.yaml
+config/stock_pool.yaml
+config/pool_structure_policy.yaml
+config/quality_suppressions.yaml
+config/regime_stock_pools.json
+config/optimization_params.json
+config/adaptive_params.yaml
+
+# 运行数据(自动生成)
+data/
+reports/
+memory/
+
+# 补充排除 (2026-08-12 复查)
+*.bak.*
+*.deprecated
+backup_20260419_235517/
+scripts/_archived/
+output1.txt
+
+# 部署配置(含绝对路径)
+cron/
+
+# 内部部署/工具脚本 (含绝对路径)
+scripts/backup.sh
+scripts/git_sync.sh
+scripts/run_with_log.sh
+scripts/kronos_predict.py
+scripts/param_optimizer.py
+scripts/sim_trade_system.py
+scripts/train_pool_v2.py
+scripts/sector_flow_analyzer.py
+scripts/trade_executor.py
+
+# 内部部署(含真实域名)
+web_dashboard/start_cloudflare_tunnel.sh
+# 锁文件/备份残留
+data_db/*.lock

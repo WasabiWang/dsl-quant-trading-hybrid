@@ -1,0 +1,101 @@
+# 盘前交易预案系统配置
+version: "1.2.0"
+update_time: "2026-04-21"
+
+# 行业配置
+sectors:
+  - code: "102900000"
+    name: "化工"
+  - code: "102800000"
+    name: "有色金属"
+  - code: "103000000"
+    name: "电子"
+  - code: "103100000"
+    name: "计算机"
+  - code: "103200000"
+    name: "医药生物"
+  - code: "103300000"
+    name: "食品饮料"
+  - code: "103400000"
+    name: "银行"
+  - code: "103500000"
+    name: "非银金融"
+  - code: "103600000"
+    name: "房地产"
+  - code: "103700000"
+    name: "交通运输"
+
+# 评分规则配置
+scoring:
+  # 行业评级阈值
+  sector_recommend_threshold: 7.0   # >=7.0 推荐
+  sector_neutral_threshold: 5.0     # >=5.0 <7.0 中性，<5.0 规避
+  # 个股评级阈值
+  stock_strong_buy_threshold: 8.5   # >=8.5 强烈增持
+  stock_buy_threshold: 7.5          # >=7.5 <8.5 增持
+  stock_hold_threshold: 6.0         # >=6.0 <7.5 持有
+  stock_reduce_threshold: 5.0       # >=5.0 <6.0 减持，<5.0 强烈减持
+  # 推荐个股最低分数
+  min_recommend_stock_score: 7.5
+
+# 风险控制配置
+risk:
+  # 波动率阈值（年化）
+  high_volatility_threshold: 25     # >=25% 高波动
+  mid_high_volatility_threshold: 18 # >=18% <25% 中高波动
+  mid_volatility_threshold: 12      # >=12% <18% 中波动，<12% 低波动
+  # 对应仓位建议
+  high_volatility_position: 0.5     # 高波动建议仓位50%
+  mid_high_volatility_position: 0.6 # 中高波动建议60%
+  mid_volatility_position: 0.75     # 中波动建议75%
+  low_volatility_position: 0.9      # 低波动建议90%
+  # 对应最大回撤阈值
+  high_volatility_max_drawdown: 3
+  mid_high_volatility_max_drawdown: 4
+  mid_volatility_max_drawdown: 5
+  low_volatility_max_drawdown: 6
+
+# 自定义股票池（可追加个股）
+custom_stock_pool:
+  # 保留原有优质标的
+  - symbol: "600760"
+    name: "中航沈飞"
+  - symbol: "600519"
+    name: "贵州茅台"
+  - symbol: "300750"
+    name: "宁德时代"
+  - symbol: "600036"
+    name: "招商银行"
+  - symbol: "000063"
+    name: "中兴通讯"
+  - symbol: "601318"
+    name: "中国平安"
+  # 新增优质标的，平衡行业与风格
+  - symbol: "600276"
+    name: "恒瑞医药"
+  - symbol: "002415"
+    name: "海康威视"
+  - symbol: "601899"
+    name: "紫金矿业"
+  - symbol: "600887"
+    name: "伊利股份"
+  - symbol: "002714"
+    name: "牧原股份"
+  - symbol: "601012"
+    name: "隆基绿能"
+  - symbol: "603986"
+    name: "兆易创新"
+  - symbol: "300760"
+    name: "迈瑞医疗"
+  - symbol: "601668"
+    name: "中国建筑"
+
+# 缓存配置
+cache:
+  expire_hours: 24
+  dir: "cache/data_adapter"
+
+# 飞书配置
+feishu:
+  bitable_token: ""
+  holding_table_id: "tblnp0B5TcOyhQCe"

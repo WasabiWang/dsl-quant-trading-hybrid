@@ -1,0 +1,36 @@
+# master_stock_pool.yaml 模板 (示例)
+# ⚠️ 真实股票池为私有配置, 不随仓库公开。
+# 使用方法: 复制本文件为 config/master_stock_pool.yaml 并填入你自己的股票池。
+#
+# 字段说明:
+#   symbol        股票代码 (6位数字)
+#   name          股票名称
+#   tier          层级: alpha | core | growth | bench | flex (不同层级对应不同仓位权重)
+#   sector        行业
+#   concept       概念标签 (逗号分隔)
+#   score         基础评分 (0-100)
+#   accuracy      模型历史精度 (0-1)
+#   min_confidence 信号最低置信度阈值
+#   degraded      是否降级 (可选)
+#   remove_candidate 是否移出候选 (可选)
+
+master_pool:
+- symbol: '000001'
+  name: 示例股票A
+  tier: alpha
+  sector: 银行
+  concept: A股-申万行业-银行,A股-热门概念-价值成长
+  score: 50
+  accuracy: 0.6
+  min_confidence: 0.5
+- symbol: '000002'
+  name: 示例股票B
+  tier: bench
+  sector: 房地产
+  concept: A股-申万行业-房地产
+  score: 45
+  accuracy: 0.55
+  min_confidence: 0.5
+  degraded: false
+  pool_updated_at: '2026-08-12'
+  remove_candidate: false

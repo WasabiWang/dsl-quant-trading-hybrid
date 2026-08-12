@@ -1,0 +1,50 @@
+# adaptive_params.yaml 模板 (示例)
+# ⚠️ 真实自适应参数(阈值/仓位/重训计划)为私有配置, 不随仓库公开。
+# 使用方法: 复制本文件为 config/adaptive_params.yaml 并按需调整。
+# 代码默认从环境变量与 config/adaptive_params.yaml 读取, 缺失时降级为内置默认值。
+
+calibration:
+  last_updated: '2026-08-12'
+  retrain_plan:
+    priority_stocks: []
+    summary: ''
+    total_flagged: 0
+
+trading:
+  buy_threshold: 0.025
+  sell_threshold: -0.015
+  max_positions: 7
+  min_hold_days: 5
+  max_hold_days: 20
+  position_size: 0.18
+  max_single_stock_pct: 0.1
+  slippage:
+    model: volume_based
+    fixed_ticks: 2
+    base_bps: 4.0
+    impact_factor: 0.8
+    min_commission: 5.0
+    stamp_tax_bps: 10.0
+  risk_management:
+    enabled: true
+    stop_loss:
+      atr_based: true
+      atr_period: 20
+      atr_min_stop: -0.04
+      atr_max_stop: -0.15
+      atr_multiplier:
+        main_board: 2.5
+        gem: 2.0
+        star: 2.0
+        bse: 2.0
+      black_swan_tighten: true
+      black_swan_atr_adjust: 0.8
+
+black_swan:
+  active: false
+  severity: 0
+  position_ratio: 1.0
+
+market_regime:
+  current: neutral
+  lookback_days: 20
