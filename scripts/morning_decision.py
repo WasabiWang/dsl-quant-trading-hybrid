@@ -84,6 +84,38 @@ def get_trade_date():
         today = today + timedelta(days=offset)
     return today.strftime('%Y%m%d'), today.strftime('%Y-%m-%d')
 
+def _load_black_swan_baseline():
+    """v4.6.9i(审计F1-1): 黑天鹅真相源统一 — 优先 data/black_swan_status.json (每日08:10 LPPL cron更新, 新鲜),
+    fallback adaptive_params risk.black_swan_position_ratio。
+    背景: adaptive_params risk.* 曾冻结2个月(0.68), 执行层读它导致危机期仓位上限比正确数据宽松1倍(审计P0-1)。
+    返回 (position_ratio: float, active: bool)
+    """
+    ratio, active = 0.8, False
+    try:
+        bs_path = os.path.join(PROJECT_ROOT, 'data', 'black_swan_status.json')
+        if os.path.exists(bs_path):
+            with open(bs_path, 'r', encoding='utf-8') as _f:
+                _bs = json.load(_f)
+            _r = _bs.get('position_ratio')
+            if _r is not None:
+                ratio = float(_r)
+            active = bool(_bs.get('active', False))
+            return ratio, active
+    except Exception:
+        pass
+    try:
+        import yaml
+        ap_path = os.path.join(PROJECT_ROOT, 'config', 'adaptive_params.yaml')
+        if os.path.exists(ap_path):
+            with open(ap_path, 'r', encoding='utf-8') as _f:
+                ap = yaml.safe_load(_f)
+            ratio = float(ap.get('risk', {}).get('black_swan_position_ratio', 0.8))
+            active = ap.get('risk', {}).get('black_swan_active', False)
+    except Exception:
+        pass
+    return ratio, active
+
+
 def _load_cached_json(fpath, default, label):
     """独立加载单个缓存文件，失败时返回默认值（不阻断其他文件）"""
     try:
@@ -751,7 +783,7 @@ def fetch_evening_pool_prices(pool_symbols: list) -> dict:
 
     v4.5.13: 改用批量API get_multi_stock_real(≤20只/次)，避免42次单股调用触发403限流
     数据源: 麦蕊API get_multi_stock_real
-    降级: akshare stock_zh_a_spot_em
+    降级: akshare stock_zh_a_spot (新浪, 东财push2已封锁, 审计F1-3)
 
     Returns:
         {symbol: {"name": str, "close": float, "change_pct": float}, ...}
@@ -799,7 +831,7 @@ def fetch_evening_pool_prices(pool_symbols: list) -> dict:
     try:
         import akshare as ak
         import pandas as pd
-        df = ak.stock_zh_a_spot_em()
+        df = ak.stock_zh_a_spot()  # v4.6.9i(审计F1-3): 东财→新浪(东财push2实测封锁, 新浪实测可用)
         if df is not None and len(df) > 0:
             df["code"] = df["代码"].str.replace(r"^(sh|sz|bj)", "", regex=True)
             for sym in pool_symbols:
@@ -877,19 +909,8 @@ def fetch_evening_market_data(pool_symbols: list = None) -> tuple:
     except Exception as e:
         print(f"  ⚠️ 加载ML预测用于多因子评分失败: {e}")
 
-    # 加载风险参数(F4用)
-    risk_position_ratio = 0.8
-    black_swan_active = False
-    try:
-        import yaml
-        ap_path = os.path.join(PROJECT_ROOT, 'config', 'adaptive_params.yaml')
-        if os.path.exists(ap_path):
-            with open(ap_path, 'r', encoding='utf-8') as f:
-                ap = yaml.safe_load(f)
-            risk_position_ratio = float(ap.get('risk', {}).get('black_swan_position_ratio', 0.8))
-            black_swan_active = ap.get('risk', {}).get('black_swan_active', False)
-    except Exception:
-        pass
+    # 加载风险参数(F4用) — v4.6.9i(审计F1-1): 真相源统一为 black_swan_status.json, adaptive_params仅fallback
+    risk_position_ratio, black_swan_active = _load_black_swan_baseline()
 
     # v4.5.8.2: 修复#1 — pool_prices可能无name(麦蕊API不返回name字段)
     # 从stock_pool/daily_predict补充名称
@@ -1022,15 +1043,10 @@ def fetch_evening_market_data(pool_symbols: list = None) -> tuple:
         print(f"  ⚠️ 黑天鹅数据跳过: {e}")
 
     # 也检查 adaptive_params.yaml
+    # v4.6.9i(审计F1-1): bs基线改读black_swan_status.json(每日新鲜), adaptive_params仅fallback
     try:
-        import yaml
-        ap_path = os.path.join(PROJECT_ROOT, 'config', 'adaptive_params.yaml')
-        if os.path.exists(ap_path):
-            with open(ap_path, 'r', encoding='utf-8') as f:
-                ap = yaml.safe_load(f)
-            bs_ratio = ap.get('risk', {}).get('black_swan_position_ratio', None)
-            if bs_ratio is not None:
-                risk_data['position_ratio'] = min(risk_data['position_ratio'], float(bs_ratio))
+        bs_ratio, _ = _load_black_swan_baseline()
+        risk_data['position_ratio'] = min(risk_data['position_ratio'], float(bs_ratio))
     except Exception:
         pass
 
@@ -1043,6 +1059,19 @@ def fetch_evening_market_data(pool_symbols: list = None) -> tuple:
                 lppl_report = json.load(f)
             from black_swan_optimized.lppl_to_dsl import compute_lppl_position_ratio
             lp = compute_lppl_position_ratio(lppl_report)
+            # v4.6.9i(审计F1-1): LPPL比率统一取black_swan_status.lppl(单一真相源, 与Dashboard/熔断器同源),
+            # 原lppl_daily.suggested_position_ratio口径不一致(0.55 vs status 0.31)造成双口径分裂(审计P0-1)
+            _bs_st_path = os.path.join(PROJECT_ROOT, 'data', 'black_swan_status.json')
+            if os.path.exists(_bs_st_path):
+                try:
+                    with open(_bs_st_path, 'r', encoding='utf-8') as _sf:
+                        _st_lppl = (json.load(_sf).get('lppl') or {})
+                    if _st_lppl.get('position_ratio') is not None:
+                        lp['lppl_position_ratio'] = float(_st_lppl['position_ratio'])
+                        lp['lppl_risk_score'] = float(_st_lppl.get('risk_score', lp['lppl_risk_score']))
+                        lp['urgency'] = _st_lppl.get('urgency', lp['urgency'])
+                except Exception:
+                    pass
             risk_data['lppl'] = {
                 'timestamp': datetime.now().isoformat(),
                 'risk_score': lp['lppl_risk_score'],
@@ -1650,16 +1679,9 @@ def calculate_final_position(macro_score, sector_scores, risk_data):
     if risk_position is None:
         risk_position = risk_data.get('recommended_position_ratio', None)
     if risk_position is None:
-        # fallback: 从adaptive_params.yaml读取
-        try:
-            import yaml
-            ap_path = os.path.join(PROJECT_ROOT, 'config', 'adaptive_params.yaml')
-            with open(ap_path, 'r', encoding='utf-8') as f:
-                ap = yaml.safe_load(f)
-            risk_position = float(ap.get('risk', {}).get('black_swan_position_ratio', 0.8))
-            print(f"  ✅ fallback: adaptive_params black_swan_position_ratio = {risk_position}")
-        except Exception:
-            risk_position = 0.8
+        # v4.6.9i(审计F1-1): fallback真相源 black_swan_status.json, adaptive_params仅次选
+        risk_position, _ = _load_black_swan_baseline()
+        print(f"  ✅ fallback: black_swan_baseline = {risk_position}")
     
     # 加权融合
     # 黑天鹅活跃时提高风险权重 (0.2:0.2:0.6)，防止宏观/行业评分稀释风险限制

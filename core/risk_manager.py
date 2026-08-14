@@ -109,6 +109,40 @@ class RiskManager:
         self._bs_cache_ttl = 300    # 缓存有效期(秒)
         self._load_position_peaks()  # P2-FIX: 启动时加载持久化峰值
 
+    def _load_bs_severity(self) -> int:
+        """v4.6.9i(审计F1-1): 读取最新黑天鹅severity — 优先 memory/black-swan 最新 analysis JSON
+        (21:00复盘每日写入, severity_overview.current_overall_severity),
+        fallback event_history.json(曾冻结2个月, 审计P4-WARN)。"""
+        try:
+            _cands = []
+            for _dir in (os.path.join(PROJECT_ROOT, '..', 'memory', 'black-swan'),
+                         os.path.expanduser('~/.agents/skills/black-swan-monitor/data')):
+                if os.path.isdir(_dir):
+                    for _f in os.listdir(_dir):
+                        if _f.startswith('analysis-') and _f.endswith('.json'):
+                            _cands.append(os.path.join(_dir, _f))
+            if _cands:
+                _cands.sort(reverse=True)
+                with open(_cands[0], 'r', encoding='utf-8') as _f:
+                    _data = json.load(_f)
+                _so = _data.get('severity_overview', {}) or {}
+                _sev = _so.get('current_overall_severity')
+                if _sev is not None:
+                    return int(_sev)
+        except Exception:
+            pass
+        # fallback: event_history.json 旧结构
+        try:
+            with open(os.path.join(PROJECT_ROOT, 'confidence_data', 'event_history.json')) as f:
+                events_data = json.load(f)
+            bs_severity = 0
+            for evt in events_data.get('events', []):
+                for se in (evt.get('data', {}) or {}).get('events', []):
+                    bs_severity = max(bs_severity, se.get('severity', 0))
+            return bs_severity
+        except Exception:
+            return 0
+
     # ═══════════════ 止损检查 ═══════════════
 
     def check_single_position_stop(
@@ -130,21 +164,9 @@ class RiskManager:
             try:
                 now = time.time()
                 if self._bs_cache is None or (now - self._bs_cache_time) > self._bs_cache_ttl:
-                    with open(os.path.join(PROJECT_ROOT, "confidence_data", "event_history.json")) as f:
-                        self._bs_cache = json.load(f)
+                    self._bs_cache = self._load_bs_severity()
                     self._bs_cache_time = now
-                events_data = self._bs_cache
-                # P0-2 fix: event_history.json 结构为 {"events": [{..., "data": {"events": [{"severity": N, ...}]}}]
-                # 读取最高severity而非不存在的 overall.current_severity
-                bs_severity = 0
-                raw_events = events_data.get("events", [])
-                for evt in raw_events:
-                    evt_data = evt.get("data", {})
-                    sub_events = evt_data.get("events", [])
-                    for se in sub_events:
-                        sev = se.get("severity", 0)
-                        if sev > bs_severity:
-                            bs_severity = sev
+                bs_severity = self._bs_cache
                 if bs_severity >= 7:
                     stop_loss = max(stop_loss, -0.05)
                     logger.info(f"🦢 黑天鹅severity={bs_severity} → 止损收紧到{stop_loss:.1%}")

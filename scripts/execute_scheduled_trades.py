@@ -252,6 +252,49 @@ def execute_trades(trades: list, market: str = "A", enforce_prediction_freshness
     except Exception as _e:
         print(f"⚠️ 精度过滤加载失败(降级为全通过): {_e}")
     
+    # ──────────── v4.6.9i(审计F1-2): 组合级风控前置检查 ────────────
+    # 修复: 活跃执行器此前绕过 risk_manager.pre_execution_check → 行业配额/组合止损/RS止盈实盘不生效(审计P0-4)
+    _trader = None
+    _equity = None
+    try:
+        from core.risk_manager import RiskManager
+        _risk = RiskManager()
+        _pool_path2 = os.path.join(PROJECT_ROOT, 'config', 'master_stock_pool.yaml')
+        with open(_pool_path2, 'r', encoding='utf-8') as _f:
+            _stock_pool = yaml.safe_load(_f).get('master_pool', [])
+        _trader = PaperTrader()
+        _ledger = _trader.load_ledger()
+        _positions = [{"code": p.get("stock_code", ""), "avg_cost": p.get("avg_cost", 0),
+                       "current_price": p.get("current_price", 0), "quantity": p.get("quantity", 0)}
+                      for p in _ledger.get("positions", [])]
+        _init_cap = float(_ledger.get("initial_capital", 1000000))
+        _cash = float(_ledger.get("current_cash", 0))
+        _equity = _cash + sum(float(p["current_price"]) * int(p["quantity"]) for p in _positions)
+        _risk_result = _risk.pre_execution_check(trades, _positions, _init_cap, _equity, _stock_pool)
+        if not _risk_result.get("approved", True):
+            print(f"🔴 组合风控拒绝: {_risk_result.get('portfolio_status', '不明')}")
+            _blocked_codes = {b.get("code", "") for b in _risk_result.get("blocked_trades", [])}
+            for _b in _risk_result.get("blocked_trades", []):
+                print(f"  🚫 {_b.get('code','')} {_b.get('name','')}: {_b.get('reason','')}")
+            trades = [t for t in trades if t.get("code", t.get("symbol", "")) not in _blocked_codes]
+        for _sl in _risk_result.get("stop_losses", []):
+            print(f"  ⚠️ 止损提示: {_sl.get('code','')} {_sl.get('name','')}: {_sl.get('reason','')}")
+        for _cv in _risk_result.get("concentration_violations", []):
+            print(f"  ⚠️ 集中度违规: {_cv.get('code','')} {_cv.get('sector','')}: {_cv.get('reason','')}")
+    except Exception as _re:
+        print(f"⚠️ 组合风控检查失败(降级放行, 需人工关注): {_re}")
+    
+    # ──────────── v4.6.9i(审计F1-4): 熔断器当日回撤回写 ────────────
+    # 修复: update_drawdown 此前无生产调用者, 日内回撤熔断机制空转(审计P0-7)
+    if _equity is not None:
+        try:
+            from core.circuit_breaker import CircuitBreaker
+            _cb = CircuitBreaker()
+            _dd = _cb.update_equity_drawdown(_equity)
+            print(f"  📉 熔断回撤: 当日 {_dd:+.2%}")
+        except Exception as _e2:
+            print(f"⚠️ 熔断回撤更新失败: {_e2}")
+    
     for trade in trades:
         code = trade.get("code", trade.get("symbol", ""))
         action = trade.get("action", trade.get("signal", "hold")).lower()
@@ -576,6 +619,24 @@ def main():
     if _tracker:
         _tracker.step(3, f"完成: {_exec}成功/{_fail}失败/{len(results)}总计")
         _tracker.complete(f"{_exec}笔执行, {_fail}笔失败")
+    
+    # ──────────── v4.6.9i(审计F1-5): 每日账目对账 ────────────
+    if _trader is not None:
+        try:
+            _recon = _trader.run_portfolio_reconciliation()
+            _status = "✅" if _recon.get("ok") else "🔴"
+            print(f"{_status} 账目对账: 现金{_recon.get('cash', 0):,.0f} + 持仓{_recon.get('pos_value', 0):,.0f} "
+                  f"= {_recon.get('equity_implied', 0):,.0f} vs 账面{_recon.get('equity_stored', 0):,.0f} "
+                  f"(差异{_recon.get('diff', 0):+,.2f})")
+            if not _recon.get("ok"):
+                try:
+                    from common.feishu_utils import send_markdown as _fs
+                    _fs(f"🔴 **DSL账目对账异常**\n\n现金+持仓 ≠ 账面权益, 差异 {_recon.get('diff', 0):+,.2f} 元\n\n"
+                        f"请检查 paper_trading.db ledger/positions/performance_metrics")
+                except Exception:
+                    pass
+        except Exception as _re2:
+            print(f"⚠️ 账目对账失败: {_re2}")
     
     return results
 

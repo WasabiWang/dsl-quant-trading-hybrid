@@ -173,10 +173,38 @@ class CircuitBreaker:
         # is_trading_allowed()作为通用门控，不持有交易上下文参数
         return True, "交易允许"
     
+    def pause(self, reason: str, hours: float = 2.0) -> bool:
+        """v4.6.9i(审计F1-3): 手动/自动暂停交易(如止损监控数据源全空时)。
+        写 trading_paused=True + pause_until, is_trading_allowed() 自动拦截。"""
+        try:
+            data = self._load_data()
+            data["trading_paused"] = True
+            data["pause_until"] = time.time() + hours * 3600
+            data["pause_reason"] = reason[:200]
+            self._save_data(data)
+            return True
+        except Exception as e:
+            print(f"⚠️ 暂停交易写入失败: {e}")
+            return False
+
+    def update_equity_drawdown(self, equity: float) -> float:
+        """v4.6.9i(审计F1-4): 从当前总权益计算当日回撤并回写熔断器(生产调用点)。
+        首次调用设置 today_starting_capital; 返回当日回撤百分比(负数)。"""
+        data = self._load_data()
+        start = data.get("today_starting_capital", 0)
+        if not start or start <= 0:
+            start = equity
+            data["today_starting_capital"] = equity
+            self._save_data(data)
+        dd = (equity - start) / start if start > 0 else 0.0
+        self.update_drawdown(dd)
+        return dd
+
     def update_drawdown(self, current_drawdown: float):
         """更新今日最大回撤，触发熔断阈值自动暂停"""
         data = self._load_data()
-        if current_drawdown > data["today_drawdown"]:
+        # v4.6.9i(审计F1-4): 修复方向比较 — 回撤为负数, 原 `>` 与初始值0.0比较导致永不更新
+        if current_drawdown < data["today_drawdown"]:
             data["today_drawdown"] = current_drawdown
 
         # 黑天鹅联动: severity≥6 时回撤阈值从5%收紧到3%

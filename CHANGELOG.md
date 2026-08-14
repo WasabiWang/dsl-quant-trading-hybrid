@@ -1,3 +1,42 @@
+# v4.6.9i (2026-08-15) — 风控闭环批次一（全量审计修复批1/4）
+
+基于 v4.6.9h.2 全量审计（8报告, 总评67/100, 7 P0），本批修复全部P0级风控问题：
+
+## 🔴 F1-1 黑天鹅真相源单一化（审计P0-1）
+- morning_decision 三处 bs 基线/LPPL比率改读 data/black_swan_status.json（每日08:10新鲜）
+- adaptive_params risk.* 仅作fallback（曾冻结2个月0.68 → 仓位上限比正确数据宽松1倍）
+- risk_manager 黑天鹅收紧源: event_history(冻结6/15) → memory/black-swan最新analysis的severity
+- LPPL cron 增加 --update-config，adaptive_params lppl_position_ratio 恢复每日刷新
+- 效果(8/14数据): 执行链 bs=0.31×融合→0.31×BEAR_WEAK 0.4 = 上限12.4%（原25.1%）
+
+## 🔴 F1-2 活跃执行器接入组合风控（审计P0-4）
+- execute_scheduled_trades 下单前调用 pre_execution_check（行业配额/组合止损/RS止盈/集中度）
+- 持仓/权益从 load_ledger() 构建（PaperTrader无list_positions等旧接口）
+
+## 🔴 F1-3 降级链东财→新浪 + 止损空数据防护（审计P0-3, 决策D2）
+- morning_decision/execute_planned_trades/stop_loss_monitor 三处降级源换 stock_zh_a_spot(新浪, 实测可用)
+- stop_loss_monitor 数据全空 → CircuitBreaker.pause(2h) + 飞书告警（替代静默跳过）
+- 新增 CircuitBreaker.pause(reason, hours) 方法
+
+## 🔴 F1-4 熔断回撤回写（审计P0-7, 决策D1）
+- 新增 CircuitBreaker.update_equity_drawdown(equity)：每日首次估值写today_starting_capital+当日回撤
+- 修复 update_drawdown 方向比较bug（原`>`与初始0.0比较致today_drawdown永不更新）
+- 生产调用点: execute_scheduled_trades(09:30) + stop_loss_monitor(5个盘中检查点)
+
+## 🔴 F1-5 账目对账 + 校准闭环激活（审计P0-5/P0-6, 决策D4）
+- 新增 PaperTrader.run_portfolio_reconciliation()：cash+持仓市值 vs 账面权益（容差0.1%），差异告警飞书
+- execute_scheduled_trades 每日调用对账
+- 校准: _fetch_actual_return 主源换麦蕊kline（akshare stock_zh_a_hist 实测封锁）；batch_predict 每日激活 check_realized_accuracy(60天)
+- 新增 scripts/backfill_realized_checks.py：历史回填（本次532条, 真实兑现精度49.2% vs 自报54.5%）
+
+## ✅ 验证
+- 10文件 ast.parse 0错误；L0/L1 全绿；L2 仅既有C2-date-current失败（09:30首次执行后自动修复）
+- 对账实测: 现金620,951.65+持仓399,159=1,020,110.65 与账面一致（DB持仓价噪音278元<0.1%容差）
+- 回填: 41只标的K线拉取100%成功，532条回填完成
+
+## ⚠️ 待观察
+- 仓位上限12.4%对新买入生效；存量39%持仓无自动降仓机制（待批次二方案）
+- 周一09:30实跑为首次完整验证（组合风控+熔断回写+对账全链路）
 # v4.6.9h (2026-08-01) — 股票池质量改进计划 (P0-P3)
 
 ## 🔴 P0: degraded持仓退出规则 (James决策)

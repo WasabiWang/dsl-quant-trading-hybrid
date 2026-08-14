@@ -76,7 +76,7 @@ def fetch_actual_prices(codes: list) -> dict:
     try:
         import akshare as ak
         import pandas as pd
-        df = ak.stock_zh_a_spot_em()
+        df = ak.stock_zh_a_spot()  # v4.6.9i(审计F1-3): 东财→新浪(东财push2实测封锁, 新浪实测可用)
         if df is not None and len(df) > 0:
             df["code"] = df["代码"].str.replace(r"^(sh|sz|bj)", "", regex=True)
             for code in codes:

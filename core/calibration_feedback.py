@@ -470,17 +470,32 @@ class CalibrationFeedback:
     
     def _fetch_actual_return(self, symbol: str, pred_date, horizon_days: int):
         """获取一只股票在预测窗口的实际收益
-        
-        使用 akshare 拉取历史K线，计算预测窗口内的实际收益率。
+
+        v4.6.9i(审计F1-5): 主源换麦蕊 get_kline_history(前复权f) — akshare stock_zh_a_hist(东财push2his)
+        实测封锁(2026-08-14), 原实现会让校准闭环全灭; akshare仅作降级。
         """
+        from datetime import timedelta
+        start = (pred_date - timedelta(days=5)).strftime("%Y%m%d")
+        end = (pred_date + timedelta(days=horizon_days * 3)).strftime("%Y%m%d")
+
+        # 主源: 麦蕊
+        try:
+            from config.mairui_api_config import get_kline_history
+            rows = get_kline_history(symbol, period="d", adjust="f",
+                                     start_date=start, end_date=end)
+            if rows and isinstance(rows, list) and len(rows) >= 2:
+                import pandas as pd
+                df = pd.DataFrame(rows)
+                df["date"] = pd.to_datetime(df["t"]).dt.date
+                df = df.sort_values("date").reset_index(drop=True)
+                return self._calc_return_from_df(df, pred_date, horizon_days)
+        except Exception:
+            pass
+
+        # 降级: akshare(东财push2his, 曾封锁, 恢复后可自动生效)
         try:
             import akshare as ak
             import pandas as pd
-            from datetime import timedelta
-            
-            start = (pred_date - timedelta(days=5)).strftime("%Y%m%d")
-            end = (pred_date + timedelta(days=horizon_days * 3)).strftime("%Y%m%d")
-            
             df = ak.stock_zh_a_hist(
                 symbol=symbol, period="daily",
                 start_date=start, end_date=end,
@@ -488,24 +503,25 @@ class CalibrationFeedback:
             )
             if df is None or len(df) < 2:
                 return None
-            
             df["date"] = pd.to_datetime(df["日期"]).dt.date
+            return self._calc_return_from_df(df, pred_date, horizon_days)
+        except Exception:
+            return None
+
+    def _calc_return_from_df(self, df, pred_date, horizon_days: int):
+        """从K线DataFrame计算预测窗口实际收益 (与旧逻辑一致) """
+        try:
             pred_rows = df[df["date"] == pred_date]
             if len(pred_rows) == 0:
                 pred_rows = df[df["date"] < pred_date].tail(1)
                 if len(pred_rows) == 0:
                     return None
-            
             pred_idx = pred_rows.index[0]
-            pred_close = float(df.loc[pred_idx, "收盘"])
+            pred_close = float(df.loc[pred_idx, "close"] if "close" in df.columns else df.loc[pred_idx, "收盘"])
             target_idx = pred_idx + min(horizon_days, len(df) - pred_idx - 1)
-            
-            # 没有后续数据可用(假日/周末导致数据缺口) → 跳过本次验证
             if target_idx == pred_idx:
                 return None
-            
-            future_close = float(df.loc[target_idx, "收盘"])
-            
+            future_close = float(df.loc[target_idx, "close"] if "close" in df.columns else df.loc[target_idx, "收盘"])
             return (future_close - pred_close) / pred_close
         except Exception:
             return None

@@ -77,16 +77,32 @@ def main():
         print(f"⚠️ {len(missing)}只缺失麦蕊行情, 尝试akshare...")
         try:
             import akshare as ak
-            df_all = ak.stock_zh_a_spot_em()  # 一次性拉取全市场
-            for code in missing:
-                row = df_all[df_all['代码'] == code]
-                if not row.empty:
-                    price_dict[code] = float(row.iloc[0].get('最新价', 0))
+            df_all = ak.stock_zh_a_spot()  # v4.6.9i(审计F1-3): 降级源东财→新浪(东财push2实测封锁)
+            if df_all is not None and not df_all.empty:
+                df_all['代码6'] = df_all['代码'].astype(str).str[-6:]  # 新浪格式sh600519→6位
+                for code in missing:
+                    row = df_all[df_all['代码6'] == code]
+                    if not row.empty:
+                        price_dict[code] = float(row.iloc[0].get('最新价', 0))
         except Exception as e:
             print(f"  ⚠️ akshare拉取失败: {e}")
 
     if not price_dict:
-        print("❌ 无法获取任何实时价格, 跳过检查")
+        # v4.6.9i(审计F1-3): 数据全空时暂停交易+飞书告警(替代静默跳过, 审计P0-3)
+        print("❌ 无法获取任何实时价格 — 暂停交易并告警")
+        try:
+            from core.circuit_breaker import CircuitBreaker
+            CircuitBreaker().pause("止损监控数据源全空(麦蕊+降级均失败), 自动暂停2小时", hours=2.0)
+        except Exception as _ce:
+            print(f"⚠️ 暂停交易写入失败: {_ce}")
+        if HAS_FEISHU:
+            try:
+                _feishu_send("🔴 **DSL告警: 止损监控数据源全空**\n\n"
+                             "盘中实时价格获取失败(麦蕊与降级源均不可用)。\n\n"
+                             "**处置**: 已自动暂停交易2小时。请人工检查数据源后手动解除:\n"
+                             "`data/circuit_breaker.json` 的 `trading_paused` 置 false")
+            except Exception:
+                pass
         return
 
     print(f"✅ 已获取{len(price_dict)}只股票实时价")
@@ -98,6 +114,21 @@ def main():
     executed = result.get('executed', [])
     errors = result.get('errors', [])
     portfolio_pct = result.get('portfolio_pnl_pct', 0)
+
+    # ──────────── v4.6.9i(审计F1-4): 熔断器当日回撤回写(盘中多个检查点) ────────────
+    try:
+        from core.circuit_breaker import CircuitBreaker
+        _cb = CircuitBreaker()
+        _ledger = trader.load_ledger()
+        _cash = float(_ledger.get('current_cash', 0))
+        _pos_val = sum(float(p.get('quantity', 0)) * float(p.get('current_price', 0))
+                       for p in _ledger.get('positions', []))
+        _equity = _cash + _pos_val
+        if _equity > 0:
+            _dd = _cb.update_equity_drawdown(_equity)
+            print(f"  📉 熔断回撤: 当日 {_dd:+.2%}")
+    except Exception as _ce2:
+        print(f"⚠️ 熔断回撤更新失败: {_ce2}")
 
     if triggered > 0:
         print(f"\n🔴 止损触发: {triggered}笔")

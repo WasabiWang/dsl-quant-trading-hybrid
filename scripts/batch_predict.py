@@ -1738,4 +1738,14 @@ if __name__ == "__main__":
             pass
     _exit_code = main()
     _verify_progress_completed()
+    # ──────────── v4.6.9i(审计F1-5): 校准实现闭环每日激活 ────────────
+    # 修复: check_realized_accuracy 从未被调用, realized_checked 74条全false(审计P0-5)
+    try:
+        from core.calibration_feedback import get_calibration_feedback
+        _cf = get_calibration_feedback()
+        _r = _cf.check_realized_accuracy(max_days=60)
+        print(f"  📐 校准回验: 新增{_r.get('checked', 0)}条 | 正确{_r.get('correct', 0)}/{_r.get('total', 0)} "
+              f"| 兑现精度{_r.get('accuracy', 0):.1%}")
+    except Exception as _ce:
+        print(f"⚠️ 校准回验失败: {_ce}")
     sys.exit(_exit_code)
