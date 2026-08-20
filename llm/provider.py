@@ -2,12 +2,12 @@
 LLM提供商抽象层 - 混合模式
 
 支持多种LLM后端，带自动故障转移：
-- 主: 火山方舟（默认，用户指定）
-- 备: 火山方舟（默认，用户指定）
+- 主: DeepSeek（默认，用户指定）
+- 备: OpenRouter
 
 使用策略：
-1. 优先使用火山方舟云端模型
-2. 按照用户要求，默认不使用本地Ollama和其他外部提供商
+1. 优先使用 DeepSeek 云端模型（v4-pro 深度推理 / v4-flash 快速执行）
+2. 已禁用豆包（火山方舟）；默认不使用本地 Ollama
 """
 import subprocess
 import json
@@ -168,22 +168,22 @@ class OpenRouterProvider(LLMProvider):
         return f"openrouter/{self.model}"
 
 
-class VolcengineProvider(LLMProvider):
-    """火山方舟LLM提供商（默认，用户指定）"""
+class DeepSeekProvider(LLMProvider):
+    """DeepSeek LLM提供商（默认，替代已禁用的豆包/火山方舟）"""
     
-    def __init__(self, model: str = "volcengine-plan/doubao-seed-2.0-pro"):
+    def __init__(self, model: str = "deepseek/deepseek-v4-pro"):
         self.model = model
         self._available = True
     
     def is_available(self) -> bool:
-        """检查火山方舟是否可用（OpenClaw内置支持，永远可用）"""
+        """检查DeepSeek是否可用（OpenClaw内置支持，永远可用）"""
         return True
     
     def get_model_name(self) -> str:
         return self.model
     
     def chat(self, prompt: str, **kwargs) -> str:
-        """调用OpenClaw内置火山方舟模型"""
+        """调用OpenClaw内置DeepSeek模型"""
         try:
             # 使用subprocess调用openclaw agent命令获取结果
             result = subprocess.run(
@@ -197,7 +197,7 @@ class VolcengineProvider(LLMProvider):
             else:
                 raise Exception(f"openclaw agent失败: {result.stderr}")
         except Exception as e:
-            logger.error(f"火山方舟调用失败: {e}")
+            logger.error(f"DeepSeek调用失败: {e}")
             # LLM调用失败时返回默认分析结果，不影响主流程
             return json.dumps({
                 "recommendation": "HOLD",
@@ -297,7 +297,7 @@ class HybridLLMProvider(LLMProvider):
 
 
 def create_hybrid_llm_provider(
-    primary_type: str = "ollama",
+    primary_type: str = "deepseek",
     fallback_type: Optional[str] = "openrouter",
     **kwargs
 ) -> HybridLLMProvider:
@@ -314,9 +314,9 @@ def create_hybrid_llm_provider(
     
     def create_provider(provider_type: str, **kwargs) -> LLMProvider:
         """创建单个提供商"""
-        if provider_type == "volcengine":
-            return VolcengineProvider(
-                model=kwargs.get("volcengine_model", "volcengine-plan/doubao-seed-2.0-pro")
+        if provider_type in ("deepseek", "volcengine"):
+            return DeepSeekProvider(
+                model=kwargs.get("deepseek_model", "deepseek/deepseek-v4-pro")
             )
         elif provider_type == "ollama":
             return OllamaProvider(
@@ -347,17 +347,15 @@ def create_hybrid_llm_provider(
 
 def get_default_provider() -> HybridLLMProvider:
     """获取默认LLM提供商"""
-    # 尝试使用火山方舟作为默认
     try:
-        return create_hybrid_provider(
-            primary_type="volcengine",
+        return create_hybrid_llm_provider(
+            primary_type="deepseek",
             fallback_type=None,
-            volcengine_model="volcengine-plan/doubao-seed-2.0-pro"
+            deepseek_model="deepseek/deepseek-v4-pro"
         )
     except Exception as e:
         logger.warning(f"默认提供商创建失败，使用备用: {e}")
-        # 备用：使用OpenRouter
-        return create_hybrid_provider(
+        return create_hybrid_llm_provider(
             primary_type="openrouter",
             fallback_type=None,
             openrouter_model="openrouter/auto"

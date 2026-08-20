@@ -16,8 +16,8 @@ class DualAgentVerifier:
         :param task_type: 任务类型：trading_decision / backtest_validation / strategy_optimization
         """
         self.task_type = task_type
-        self.agent1_model = "volcengine-plan/ep-20260409205241-jnm2l"  # Doubao
-        self.agent2_model = "custom-api-deepseek-com/deepseek-chat"  # DeepSeek
+        self.agent1_model = "deepseek/deepseek-v4-pro"  # DeepSeek Pro（深度推理）
+        self.agent2_model = "deepseek/deepseek-v4-flash"  # DeepSeek Flash（独立交叉校验）
 
     def verify(self, task_type: str, result_content: str):
         """

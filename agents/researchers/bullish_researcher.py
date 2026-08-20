@@ -27,8 +27,8 @@ class BullishResearcher(BaseAgent):
         super().__init__(name, config)
         
         self.llm = create_hybrid_llm_provider(
-            primary_type="volcengine",
-            fallback_type="volcengine"
+            primary_type="deepseek",
+            fallback_type="openrouter"
         )
         
         logger.info(f"BullishResearcher [{self.name}] initialized")

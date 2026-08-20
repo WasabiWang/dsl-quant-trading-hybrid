@@ -25,10 +25,10 @@ class MacroAnalyst(BaseAgent):
     def __init__(self, name: str = "macro", config: Optional[Dict[str, Any]] = None):
         super().__init__(name, config)
         
-        # 初始化混合LLM，默认使用火山方舟模型（符合用户要求，优先使用云端模型避免本地Ollama问题）
+        # 初始化混合LLM，默认使用 DeepSeek 模型（优先使用云端模型避免本地 Ollama 问题）
         self.llm = create_hybrid_llm_provider(
-            primary_type="volcengine",
-            fallback_type="volcengine"
+            primary_type="deepseek",
+            fallback_type="openrouter"
         )
         
         logger.info(f"MacroAnalyst [{self.name}] initialized")
