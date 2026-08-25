@@ -188,3 +188,7 @@ scripts/trade_executor.py
 web_dashboard/start_cloudflare_tunnel.sh
 # 锁文件/备份残留
 data_db/*.lock
+
+# P0池瘦身(2026-08-25): 观察池含标的明细, 不公开; bak备份防泄漏
+config/observation_pool.yaml
+config/*.bak-*

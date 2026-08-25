@@ -366,9 +366,21 @@ def generate_report(trader: PaperTrader) -> str:
     lines.append("- 盘中监控: " + ("🟢 运行中" if _check_monitor_running() else "🔴 已停止"))
     lines.append("")
     lines.append(f"---")
-    lines.append(f"*报告生成: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | DSL v4.5.1*")
+    lines.append(f"*报告生成: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | DSL {_read_version()}*")
 
     return "\n".join(lines)
+
+
+def _read_version() -> str:
+    """从VERSION文件读取版本号, 失败返回unknown"""
+    try:
+        vpath = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "VERSION")
+        if os.path.exists(vpath):
+            with open(vpath) as f:
+                return f.readline().strip()
+    except Exception:
+        pass
+    return "unknown"
 
 
 def _check_monitor_running() -> bool:

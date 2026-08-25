@@ -880,7 +880,7 @@ def compute_h20d_predictions(h20d_models: dict, stock_pool: list) -> dict:
 
 def main():
     print("=" * 60)
-    print("🔮 DSL v4.5.3d 每日分批预测 (h5d+h20d双通道 + 进度追踪)")
+    print(f"🔮 DSL {_read_version()} 每日分批预测 (h5d+h20d双通道 + 进度追踪)")
     print("=" * 60)
     print(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"h5d阈值: ±{H5D_SIGNAL_THRESHOLD:.1%} | h20d阈值: ±{H20D_SIGNAL_THRESHOLD:.0%} | pool降级阈值: ±{POOL_SIGNAL_THRESHOLD:.1%}")
