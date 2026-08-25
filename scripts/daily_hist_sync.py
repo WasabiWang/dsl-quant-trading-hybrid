@@ -29,7 +29,19 @@ except BlockingIOError:
     print(f"⚠️ 另一个同步实例正在运行 (锁文件: {LOCK_FILE})，本次跳过，避免并发写冲突")
     sys.exit(0)
 
-from data_db.sync import sync_daily, verify_integrity
+from data_db.sync import sync_daily, verify_integrity, probe_data_available
+
+# baostock 数据发布滞后: 15:50 时常尚未发布当日K线 (2026-08-25 实测 16:05 仍缺)。
+# 先探测, 未发布则直接退出且不更新 last_incremental_sync, 避免:
+#   1) 全市场~5500只无谓查询浪费1小时+
+#   2) 误标"今日已同步"导致晚间 retry_hist_sync 补数被跳过
+today = datetime.now().strftime("%Y-%m-%d")
+if not probe_data_available(today):
+    print(f"⏭️  {today} 日线数据尚未发布(baostock 滞后), 本次跳过且不更新同步状态; "
+          f"晚间 retry_hist_sync.py 将在数据发布后补数")
+    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    lock_fd.close()
+    sys.exit(0)
 
 codes = sys.argv[1:] if len(sys.argv) > 1 else None
 result = sync_daily(codes=codes)

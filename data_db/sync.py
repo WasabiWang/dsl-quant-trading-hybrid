@@ -55,6 +55,41 @@ def _save_sync_state(state: dict):
         json.dump(state, f, indent=2, ensure_ascii=False)
 
 
+
+def probe_data_available(target_date: Optional[str] = None) -> bool:
+    """探测 baostock 是否已发布 target_date(默认今天) 的日线数据。
+
+    baostock 数据发布滞后于收盘 (15:50 cron 时常拉不到当日数据, 2026-08-25 实测
+    16:05 仍仅返回前一日), 由晚间 retry_hist_sync 在数据发布后补数。
+    返回 True=已发布, False=未发布/登录失败。
+    """
+    if target_date is None:
+        target_date = datetime.now().strftime("%Y-%m-%d")
+    socket.setdefaulttimeout(20)
+    try:
+        lg = bs.login()
+        if lg.error_code != "0":
+            print(f"  \u26a0\ufe0f baostock 登录失败: {lg.error_msg}")
+            return False
+        try:
+            rs = bs.query_history_k_data_plus(
+                "sh.600000", "date", start_date=target_date, end_date=target_date,
+                frequency="d", adjustflag="2",
+            )
+            has = False
+            while (rs.error_code == "0") & rs.next():
+                has = True
+                break
+            return has
+        finally:
+            try:
+                bs.logout()
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"  \u26a0\ufe0f 数据可用性探测失败: {e}")
+        return False
+
 def _update_manifest(code: str, df: pd.DataFrame):
     """更新单个股票的 manifest 条目（SHA-256 + 记录数 + 日期范围）"""
     if not os.path.exists(MANIFEST_FILE):
@@ -160,7 +195,10 @@ def _sync_single_stock(code: str, name: str = "",
                     # 已有数据 → 从最后日期+1天开始增量
                     last_date = local_range[1]
                     next_date = (datetime.strptime(last_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-                    if next_date >= end:
+                    # 交易日关键修复(2026-08-25): 原 next_date >= end 导致本地数据止于昨日时
+                    # next_date==今天 直接跳过 → 15:50 永远拉不到当日K线, 数据恒滞后1天。
+                    # 改为 next_date > end: 今天==end 时仍查询 baostock, 无新数据则返回"无数据"无害。
+                    if next_date > end:
                         return result  # 已是最新，跳过
                     start = next_date
                 else:
