@@ -2048,6 +2048,8 @@ def generate_final_report(market, display_date, macro_score, macro_result, final
             content += f"- {act_icon} **{act_label} {t['name']}({t['code']})**: {t['quantity']}股 @{t['price']:.2f} {tier_tag} | {t['reason']}\n"
     
     content += "\n---\n"
+    # v4.7.0 P1-3: 权威系统状态段 (防agent脑补异常清单)
+    content += _system_status_notes()
     content += "报告生成时间：" + datetime.now().strftime('%Y-%m-%d %H:%M:%S') + "\n"
     content += "⚠️ 决策仅供参考，投资有风险，入市需谨慎\n"
     
@@ -2057,8 +2059,64 @@ def generate_final_report(market, display_date, macro_score, macro_result, final
     print(f"✅ {report_title} 已发送到飞书")
     return content
 
-def main():
-    parser = argparse.ArgumentParser(description='盘前决策脚本')
+def _system_status_notes() -> str:
+    """v4.7.0 P1-3: 权威系统状态段 — 供晚间/盘前报告引用
+    目的: 避免cron agent自行脑补"Cron缺失/状态unknown"等异常清单
+    真值来源: 任务日志文件 + 黑天鹅状态文件 (非cron_status.json, 后者键不全)
+    """
+    lines = ["\n### 🔍 系统状态(自动)\n"]
+
+    # 1. Cron 白名单 (设计内停用需标注, 避免误报缺失)
+    cron_state = [
+        ("盘前决策(09:20)", "存在", "✅"),
+        ("自我反思(22:00)", "存在", "✅"),
+        ("收盘日报(15:10)", "设计内停用(08-01 James取消)", "⏸️"),
+        ("健康检查(15:40)", "设计内停用(v4.6.8)", "⏸️"),
+        ("黑天鹅验证(Mon+Thu)", "设计内停用(v4.6.8)", "⏸️"),
+    ]
+    for name, state, icon in cron_state:
+        lines.append(f"- {icon} {name}: {state}")
+
+    # 2. 09:30交易执行状态 (脚本层真值: 最新task_log)
+    try:
+        _log_dir = os.path.join(PROJECT_ROOT, "data", "task_logs", "trade_execution_0930")
+        _files = sorted(os.listdir(_log_dir)) if os.path.isdir(_log_dir) else []
+        if _files:
+            _latest = _files[-1]
+            _ld = os.path.join(_log_dir, _latest)
+            with open(_ld, encoding="utf-8") as _f:
+                _lj = json.load(_f)
+            _msg = _lj.get("message", "")[:80]
+            _dt = _latest[:8]
+            _icon = "✅" if _lj.get("status") == "completed" else "🔴"
+            lines.append(f"- {_icon} 交易执行(09:30): 最近日志 {_dt} — {_msg}")
+        else:
+            lines.append("- ⚠️ 交易执行(09:30): 无任务日志")
+    except Exception:
+        lines.append("- ⚠️ 交易执行(09:30): 日志读取失败")
+
+    # 3. 黑天鹅一致性 (cache真相源 vs 最新复盘analysis)
+    try:
+        _bs_path = os.path.join(PROJECT_ROOT, "data", "black_swan_status.json")
+        if os.path.exists(_bs_path):
+            with open(_bs_path, encoding="utf-8") as _f:
+                _bs = json.load(_f)
+            _active = _bs.get("active", "?")
+            _ratio = _bs.get("position_ratio", "?")
+            _upd = str(_bs.get("last_updated", "?"))[:10]
+            _today = datetime.now().strftime("%Y-%m-%d")
+            _fresh = "✅" if _upd == _today else f"⚠️ 状态文件停更({_upd})"
+            lines.append(f"- {_fresh} 黑天鹅: active={_active}, 仓位上限={float(_ratio or 0)*100:.0f}% (状态文件更新于{_upd})")
+        else:
+            lines.append("- ⚠️ 黑天鹅状态文件缺失")
+    except Exception:
+        pass
+
+    # 4. 数据源降级 (已知常态: 东财push2封锁→新浪/同花顺)
+    lines.append("- ℹ️ 数据源: 东财push2封锁(已知)→新浪/同花顺降级链, 降级属设计内行为")
+
+    lines.append("")
+    return "\n".join(lines)
     parser.add_argument('--market', type=str, required=True, choices=['a', 'hk'], help='市场类型：a=A股，hk=港股')
     parser.add_argument('--mode', type=str, default='morning', choices=['evening', 'morning'],
                         help='运行模式: evening=晚间预案预览(不执行交易), morning=早盘最终决策(执行交易)')

@@ -232,6 +232,26 @@ def update_analysis_json(lppl_result: dict, date_str: str) -> bool:
     return True
 
 
+def _load_lppl_report(path) -> dict:
+    """v4.7.0 P1-3: 健壮加载LPPL报告 — 兼容纯JSON与混合日志的 .json_raw
+    策略: 先试直接json.load; 失败则取首个'{'到末尾'}'之间的子串再parse
+    修复: cron命令链中python -c解析步骤依赖"恰好等于{的行"脆弱, 导致8/25链路断裂
+    """
+    raw = Path(path).read_text(encoding="utf-8", errors="replace")
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    start = raw.find('{')
+    end = raw.rfind('}')
+    if start >= 0 and end > start:
+        try:
+            return json.loads(raw[start:end + 1])
+        except Exception as e:
+            raise ValueError(f"LPPL报告JSON解析失败: {e}")
+    raise ValueError("LPPL报告中未找到JSON对象")
+
+
 def main():
     import argparse
     p = argparse.ArgumentParser()
@@ -246,8 +266,8 @@ def main():
     if not Path(lppl_path).exists():
         print(f'ERROR: LPPL report not found: {lppl_path}')
         sys.exit(1)
-    with open(lppl_path) as f: report = json.load(f)
-    print(f'LPPL->DSL Bridge v1.0')
+    report = _load_lppl_report(lppl_path)
+    print(f'LPPL->DSL Bridge v1.1 (robust loader)')
     print(f'  Report: {lppl_path}')
     write_lppl_risk_json(report, args.date)
     if args.update_config: update_adaptive_params_yaml(report)

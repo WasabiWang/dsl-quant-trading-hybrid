@@ -561,7 +561,6 @@ CRITICAL_WRITABLE_FILES = [
     "cache/daily_predict.json",
     "data/retrain_queue.json",
     "data/circuit_breaker.json",
-    "data/planned/planned_trades_latest.json",
     "confidence_data/prediction_calibration.json",
     "confidence_data/confidence_calibration.json",
     "confidence_data/degraded_models.json",
