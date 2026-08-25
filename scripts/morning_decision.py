@@ -1114,6 +1114,55 @@ def fetch_evening_market_data(pool_symbols: list = None) -> tuple:
     return sector_scores, alpha_scores, event_signals, risk_data
 
 
+def _pair_group_single_buy(candidates: list, held_symbols: set) -> list:
+    """v4.7.0 P2-3: 同组单买裁决 — 政策pair_controls组内当日最多1个新买单
+    组内按(调用方已排序的tier+score)取第一名; 已持仓加仓不受限
+    """
+    try:
+        import yaml as _yaml
+        _pp = os.path.join(PROJECT_ROOT, "config", "pool_structure_policy.yaml")
+        with open(_pp, encoding="utf-8") as _f:
+            _policy = _yaml.safe_load(_f) or {}
+        groups = {}
+        for pc in _policy.get("pair_controls", []) or []:
+            syms = set()
+            for s in (pc.get("symbols") or []):
+                syms.add(str(s).zfill(6))
+            for s in (pc.get("active_symbols") or []):
+                syms.add(str(s).zfill(6))
+            for s in (pc.get("observation_symbols") or []):
+                syms.add(str(s).zfill(6))
+            if len(syms) >= 2:
+                groups[pc.get("name", "g")] = syms
+        if not groups:
+            return candidates
+        kept, filtered = [], []
+        used = set()
+        for c in candidates:
+            sym = str(c.get("symbol", "")).zfill(6)
+            if sym in held_symbols:  # 已持仓加仓不受限
+                kept.append(c)
+                continue
+            gname = None
+            for gn, syms in groups.items():
+                if sym in syms:
+                    gname = gn
+                    break
+            if gname is None:
+                kept.append(c)
+            elif gname not in used:
+                used.add(gname)
+                kept.append(c)
+            else:
+                filtered.append((sym, gname))
+        if filtered:
+            print(f"  🔗 同组单买裁决: 过滤{len(filtered)}只 → {filtered}")
+        return kept
+    except Exception as _e:
+        print(f"  ⚠️ 同组单买裁决失败, 跳过: {_e}")
+        return candidates
+
+
 def plan_trades(alpha_scores, daily_predictions, final_position, trader=None,
                 existing_trades: list = None):
     """v4.6.x 从评分和ML预测生成计划交易清单
@@ -1560,6 +1609,8 @@ def plan_trades(alpha_scores, daily_predictions, final_position, trader=None,
         top_buy = new_open[:max(0, max_new_buys)] + existing_add[:3]
         # 重新按Tier+评分排序
         top_buy.sort(key=lambda x: (x.get("tier", 9), -x.get("score", 5.0)))
+        # v4.7.0 P2-3: 高相关组当日单买裁决 (组内最多1个新买单)
+        top_buy = _pair_group_single_buy(top_buy, held_symbols)
         print(f"  📊 买入候选: 新开{len(new_open)}只→可{max(0,max_new_buys)}只, 加仓{len(existing_add)}只→不限")
     else:
         top_buy = []

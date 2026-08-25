@@ -701,3 +701,28 @@
   - server.py api_paper_trader 复用 get_paper_trader_sync (保留后台价格刷新触发)
   - 前端删除 loadPaperTraderBg 异步补丁, renderPaperTrader 直接从 DATA.paperTrader 渲染
 - **验证**: /api/full.paperTrader 与 /api/paper-trader 完全一致(总资产1032017.11/8持仓/市值零差异); agent-browser 交易页+刷新+各tab正常
+
+# v4.7.0 (2026-08-25) — 股票池结构优化 (29→17只)
+
+基于深度分析(电子超配31%/相关性对5组违反/38%标的degraded/治理闭环断裂), 分三阶段:
+
+## 🔴 P0: 池子瘦身与结构合规 (配置层)
+- 移出12只至 observation_pool.yaml: 9只remove_candidate + 瑞芯微/北京君正/通富微电
+- 中国平安保留(持仓600股+盈利12.2%, 盈利degraded观察规则)
+- 指标: 精度均值0.513→0.561, 精度<50%从11→1只, 电子31%→23.5%
+- pair_controls对齐: 存储/封测/通信AI自动合规, baijiu active=[000858,600519], AI应用豁免注
+- retrain_queue清理71条(116→45), planned_trades清除百济神州
+
+## 🟡 P1: 治理闭环
+- update_pool_by_accuracy: remove_candidate自动移出(持仓保护) + 观察池回池机制(30天≥3样本精度≥50%)
+- pool_structure_audit: tier别名映射 + stock_pool.yaml prune重建(25只漂移清理)
+- batch_predict: 观察池+影子池 predict-only覆盖(12只, suspended层, morning_decision已显式跳过)
+- shadow_weekly_train_verify.py: 周日先训后验(修复acc=0根因: 候选无模型/无预测产出)
+- 新cron: 股票池结构审计(周日10:00)
+
+## 🟢 P2: 信号质量 (回测验证后部署)
+- 波动率自适应h5d阈值: 有效门槛=1%×clamp(vol20/截面中位数, 0.5, 2.0)
+  - 回测(90天817条预测): 方向精度51.3%→52.5%, 盈亏比1.22→1.26
+  - 新增74条低波信号精度51.4%, 过滤51条高波信号原本精度43.1%
+- tier命名统一: TIER_LAYER_MAP对齐alpha/core/bench
+- 同组单买裁决: pair组当日最多1个新买单(白酒组双买防护)

@@ -288,10 +288,13 @@ def run_audit(include_correlation=True):
         passes.append("master_stock_pool and stock_pool symbols match")
 
     tier_sector_mismatches = []
+    # v4.7.0 P1-3: tier别名映射 (master alpha/bench/core vs stock bluechip/flex/core)
+    _tier_alias = {"alpha": "bluechip", "bench": "flex", "core": "core"}
     for symbol in sorted(master_symbols & stock_symbols):
         master_row = master_by_symbol[symbol]
         stock_row = stock_by_symbol[symbol]
-        if master_row.get("tier") != stock_row.get("tier") or master_row.get("sector", "") != stock_row.get("sector", ""):
+        _m_tier = _tier_alias.get(master_row.get("tier"), master_row.get("tier"))
+        if _m_tier != stock_row.get("tier") or master_row.get("sector", "") != stock_row.get("sector", ""):
             tier_sector_mismatches.append({
                 "symbol": symbol,
                 "master_tier": master_row.get("tier"),

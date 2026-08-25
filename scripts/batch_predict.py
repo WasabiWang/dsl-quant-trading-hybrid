@@ -224,9 +224,12 @@ LOW_ACCURACY_SUSPENDED = []  # v4.5.3: 废弃硬编码黑名单，改用 tier �
 # ── v4.5.3: tier → 交易层级映射 ──
 OBSERVATION_TIERS = {"cyclical", "flex"}  # 观察池（周期/灵活仓，仅监控不发信号）
 TIER_LAYER_MAP = {
+    # v4.7.0 P2-2: 对齐现行tier体系(alpha/core/bench), 旧名保留兼容
+    "alpha": "蓝筹池",
     "bluechip": "蓝筹池",
     "core": "成长池",
     "growth": "成长池",
+    "bench": "观察池",
     "cyclical": "观察池",
     "flex": "观察池",
 }
@@ -455,17 +458,19 @@ def fetch_kline(code: str) -> pd.DataFrame:
     return None
 
 
-def compute_h5d_signal(pred_return: float, accuracy: float) -> dict:
+def compute_h5d_signal(pred_return: float, accuracy: float, vol_scale: float = 1.0) -> dict:
     """v4.6.x: 平滑信号权重 — sigmoid联合精度×收益幅度判信号
     v4.6.9f P1-2: 双门槛 — 方向精度≥55% 且 |预测收益|≥1% 才允许buy/sell
     (55%精度+2%盈亏-0.2%费用=0边际, 需更严门槛才有正期望)
+    v4.7.0 P2-1: 波动率自适应 — min_ret和±阈值均×vol_scale
+    (高波标的抬高触发线避免噪音交易, 低波标的降低触发线捕捉弱信号)
 
     权重计算: w_acc = sigmoid((acc - 0.40) / 0.06)
     幅度评分: mag = sigmoid(|ret| / 0.01)
     综合分数: signal_score = w_acc × mag
 
     signal_score < 0.25 → 强制hold（精度与收益均不足以提供边沿）
-    否则 → 按±0.5%阈值正常生成buy/sell，加权signal_score
+    否则 → 按阈值正常生成buy/sell，加权signal_score
     置信度 = accuracy（无人工上限）"""
 
     w_acc = 1.0 / (1.0 + math.exp(-(accuracy - SIGMOID_ACC_MIDPOINT) / SIGMOID_ACC_STEEPNESS))
@@ -489,18 +494,22 @@ def compute_h5d_signal(pred_return: float, accuracy: float) -> dict:
     if signal_score < SIGNAL_SCORE_SUPPRESS:
         signal = "hold"
         signal_weight = signal_score
-    elif accuracy >= _min_acc and abs(pred_return) >= _min_ret:
-        if pred_return > H5D_SIGNAL_THRESHOLD:
-            signal = "buy"
-        elif pred_return < -H5D_SIGNAL_THRESHOLD:
-            signal = "sell"
-        else:
-            signal = "hold"
-        signal_weight = signal_score
     else:
-        # 精度或幅度不足 → 降级hold (保留signal_weight供观察)
-        signal = "hold"
-        signal_weight = signal_score * 0.5
+        # v4.7.0 P2-1: 波动率自适应 — 有效门槛 = 基础门槛 × vol_scale
+        _min_ret_eff = _min_ret * vol_scale
+        _h5d_thr_eff = H5D_SIGNAL_THRESHOLD * vol_scale
+        if accuracy >= _min_acc and abs(pred_return) >= _min_ret_eff:
+            if pred_return > _h5d_thr_eff:
+                signal = "buy"
+            elif pred_return < -_h5d_thr_eff:
+                signal = "sell"
+            else:
+                signal = "hold"
+            signal_weight = signal_score
+        else:
+            # 精度或幅度不足 → 降级hold (保留signal_weight供观察)
+            signal = "hold"
+            signal_weight = signal_score * 0.5
 
     return {
         "signal": signal,
@@ -937,6 +946,20 @@ def main():
     # v4.5.4: P0改进的h20d预测 (基本面+截面rank特征)
     h20d_preds = compute_h20d_predictions(h20d_models, stocks)
 
+    # ── v4.7.0 P2-1: 波动率自适应阈值 ──
+    _vol_scales = {}
+    try:
+        _vol_map = _compute_vol20_map([s["symbol"] for s in stocks])
+        _vol_scales = _vol_adaptive_scales(_vol_map, [s["symbol"] for s in stocks])
+        if _vol_scales:
+            _scaled = {c: round(v, 2) for c, v in _vol_scales.items() if abs(v - 1.0) > 0.01}
+            print(f"🌊 波动率自适应阈值: ✅ 启用 ({len(_scaled)}只缩放: {_scaled})")
+        else:
+            print(f"🌊 波动率自适应阈值: ❌ 未启用 (静态阈值)")
+    except Exception as _ve:
+        print(f"🌊 波动率自适应阈值: 计算失败({_ve}), 回退静态")
+        _vol_scales = {}
+
     # ── v4.5.3: 动态阈值引擎初始化 ──
     dt_engine = None
     if USE_DYNAMIC_THRESHOLD:
@@ -1042,7 +1065,8 @@ def main():
         # ═══════════════ B: 优先使用h5d增强预测 ═══════════════
         if code in enhanced:
             e = enhanced[code]
-            sig = compute_h5d_signal(e["predicted_return"], e["direction_accuracy"])
+            sig = compute_h5d_signal(e["predicted_return"], e["direction_accuracy"],
+                                      vol_scale=_vol_scales.get(code, 1.0))
             
             # v4.5.5 S2: 多Horizon交叉确认（强化方向矛盾裁决）
             h20d_r = h20d_preds.get(code, {})
@@ -1378,6 +1402,20 @@ def main():
     sector_quality_blocked = _apply_sector_quality_buy_gate(results)
     if sector_quality_blocked:
         print(f"🏷️ 弱行业BUY阻断: {len(sector_quality_blocked)}只 ({', '.join(sorted(sector_quality_blocked))})")
+    # ── v4.7.0 P1: 观察池+影子池 predict-only 覆盖 ──
+    # 为移出/候选标的持续产出预测, 喂 feedback_controller→calibration, 支撑回池/入池评估
+    _observe_count = 0
+    try:
+        _obs_stocks = _load_observation_symbols()
+        if _obs_stocks:
+            _results_before = len(results)
+            results = _append_predict_only(results, _obs_stocks, enhanced, h20d_preds,
+                                           _calibration_stock_accuracy, predictor)
+            _observe_count = len(results) - _results_before
+            if _observe_count:
+                print(f"🔭 观察覆盖: {_observe_count}只 predict-only (观察池+影子池, 不进信号层)")
+    except Exception as _oe:
+        print(f"⚠️ 观察覆盖失败: {_oe}")
     final_high_confidence = sum(
         1 for r in results
         if r.get("confidence_level") == "high" and r.get("signal") != "hold"
@@ -1422,6 +1460,7 @@ def main():
         "h20d_threshold": H20D_SIGNAL_THRESHOLD,
         "enhanced_stocks": len(enhanced),
         "total_stocks": len(stocks),
+        "observation_stocks": _observe_count,
         "high_confidence_h5d": h5d_hit,
         "high_confidence_pool": pool_hit,
         "high_confidence": final_high_confidence,
@@ -1560,6 +1599,195 @@ def _read_version() -> str:
     except Exception:
         pass
     return "unknown"
+
+
+def _compute_vol20_map(codes: list) -> dict:
+    """v4.7.0 P2-1: 20日年化波动率 {code: vol20}
+    用于波动率自适应信号阈值 (高波标的抬高触发线, 低波标的降低)
+    数据源: 麦蕊日K (免费版~120条足够); 失败标的回退1.0(不缩放)
+    """
+    out = {}
+    try:
+        from config.mairui_api_config import get_kline_history
+        for c in codes:
+            try:
+                kl = get_kline_history(c, period="d", adjust="f", limit=45)
+                if not kl or len(kl) < 25:
+                    out[c] = 1.0
+                    continue
+                closes = [float(x["c"]) for x in kl]
+                rets = [closes[i] / closes[i - 1] - 1 for i in range(1, len(closes))]
+                # 20日窗口
+                window = rets[-20:]
+                if not window:
+                    out[c] = 1.0
+                    continue
+                mean = sum(window) / len(window)
+                var = sum((r - mean) ** 2 for r in window) / max(len(window) - 1, 1)
+                out[c] = math.sqrt(var) * math.sqrt(252) if var > 0 else 1.0
+            except Exception:
+                out[c] = 1.0
+    except Exception:
+        pass
+    return out
+
+
+def _vol_adaptive_scales(vol_map: dict, codes: list) -> dict:
+    """v4.7.0 P2-1: 波动率缩放系数 = clamp(vol20/中位数, 0.5, 2.0)
+    未启用时全部返回1.0(行为不变)
+    """
+    try:
+        import yaml as _yaml
+        with open(os.path.join(PROJECT_ROOT, "config", "adaptive_params.yaml"), "r", encoding="utf-8") as _f:
+            _ap = _yaml.safe_load(_f) or {}
+        _sig = _ap.get("signal", {}) or {}
+        _enabled = bool(_sig.get("use_vol_adaptive", False))
+        if not _enabled:
+            return {}
+        _floor = float(_sig.get("vol_scale_floor", 0.5))
+        _cap = float(_sig.get("vol_scale_cap", 2.0))
+    except Exception:
+        return {}
+    vals = [v for v in vol_map.values() if v > 0]
+    if not vals:
+        return {}
+    med = sorted(vals)[len(vals) // 2]
+    if med <= 0:
+        return {}
+    scales = {}
+    for c in codes:
+        v = vol_map.get(c, med)
+        scales[c] = max(_floor, min(_cap, v / med))
+    return scales
+
+
+def _load_observation_symbols() -> list:
+    """v4.7.0 P1: 读取观察池+影子池候选 → predict-only覆盖
+    返回 [{symbol, name, sector, pool}] (排除主池已有标的)
+    """
+    out = []
+    try:
+        main_codes = {s["symbol"] for s in get_stock_pool()}
+        # 观察池 (移出标的, 30天评估回池)
+        obs_path = os.path.join(PROJECT_ROOT, "config", "observation_pool.yaml")
+        if os.path.exists(obs_path):
+            with open(obs_path, encoding="utf-8") as f:
+                _obs = yaml.safe_load(f) or {}
+            for s in _obs.get("observation_pool", []):
+                sym = str(s.get("symbol", ""))
+                if sym and sym not in main_codes:
+                    out.append({"symbol": sym, "name": s.get("name", sym),
+                                "sector": s.get("sector", ""), "pool": "observation"})
+        # 影子池 (候选标的, 2周观察后评估入池)
+        sh_path = os.path.join(PROJECT_ROOT, "config", "shadow_pool.yaml")
+        if os.path.exists(sh_path):
+            with open(sh_path, encoding="utf-8") as f:
+                _sh = yaml.safe_load(f) or {}
+            for s in _sh.get("candidates", []):
+                sym = str(s.get("symbol", ""))
+                if sym and sym not in main_codes:
+                    out.append({"symbol": sym, "name": s.get("name", sym),
+                                "sector": s.get("sector", ""), "pool": "shadow"})
+    except Exception as e:
+        print(f"  ⚠️ 观察池读取失败: {e}")
+    return out
+
+
+def _load_enhanced_for_symbols(symbols: set, max_age_days: int = 7) -> dict:
+    """v4.7.0 P1: 观察/影子标的专用增强报告加载
+    独立于主池报告选择逻辑(主链只保留1份最新全量报告, 会挤出周日观察训练报告)
+    按新到旧扫描, 每个symbol取最新一份含 direction_accuracy>0 的报告
+    """
+    out = {}
+    try:
+        all_files = sorted(glob.glob(os.path.join(ENHANCED_DIR, "prediction_enhanced_*.json")),
+                           key=os.path.getmtime, reverse=True)
+        cutoff = time.time() - max_age_days * 24 * 3600
+        for fp in all_files:
+            if os.path.getmtime(fp) < cutoff:
+                break
+            if all(s in out for s in symbols):
+                break
+            try:
+                with open(fp, encoding="utf-8") as f:
+                    data = json.load(f)
+                for sym in symbols:
+                    if sym in out:
+                        continue
+                    sdata = data.get(sym, {})
+                    h5d = sdata.get("h5d", {}) if isinstance(sdata, dict) else {}
+                    if h5d and h5d.get("direction_accuracy", 0) > 0:
+                        out[sym] = {
+                            "predicted_return": h5d.get("predicted_return", 0),
+                            "direction_accuracy": h5d["direction_accuracy"],
+                        }
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out
+
+
+def _append_predict_only(results: list, obs_stocks: list, enhanced: dict,
+                         h20d_preds: dict, calibration_stock_accuracy: dict,
+                         predictor=None) -> list:
+    """v4.7.0 P1: 观察/影子标的 predict-only — 不产生交易信号, 只为校准链喂精度
+    精度来源优先级: enhanced h5d > pool_predictor模型 > h20d > 校准last_accuracy; 全无则跳过(无模型)
+    signal强制hold + confidence_level=suspended (morning_decision已显式跳过suspended层)
+    """
+    existing = {r["symbol"] for r in results}
+    _obs_enhanced = _load_enhanced_for_symbols({s["symbol"] for s in obs_stocks})
+    _registered = set(predictor.get_all_codes()) if predictor is not None else set()
+    for s in obs_stocks:
+        code = s["symbol"]
+        if code in existing:
+            continue
+        acc = 0.0
+        pred_ret = 0.0
+        horizon = "5d"
+        h20d_r = h20d_preds.get(code, {})
+        _e = enhanced.get(code, {})
+        if _e.get("direction_accuracy", 0) > 0:
+            acc = float(_e["direction_accuracy"])
+            pred_ret = float(_e.get("predicted_return", 0))
+        elif code in _obs_enhanced:
+            _oe = _obs_enhanced[code]
+            acc = float(_oe["direction_accuracy"])
+            pred_ret = float(_oe.get("predicted_return", 0))
+        elif predictor is not None and code in _registered:
+            # pool_predictor 模型预测 (移出标的有既有模型, 立即可覆盖)
+            try:
+                _df = fetch_kline(code)
+                if _df is not None and len(_df) >= 30:
+                    _pred = predictor.predict(code, _df, s["name"])
+                    if _pred:
+                        acc = float(_pred.get("accuracy", 0) or 0)
+                        pred_ret = float(_pred.get("predicted_return", 0) or 0)
+                        horizon = "1d"
+            except Exception:
+                pass
+        if acc <= 0 and h20d_r.get("direction_accuracy", 0) > 0:
+            acc = float(h20d_r["direction_accuracy"])
+            pred_ret = float(h20d_r.get("predicted_return", 0))
+        if acc <= 0 and code in calibration_stock_accuracy:
+            _accs = calibration_stock_accuracy[code].get("accuracies", [])
+            if _accs:
+                acc = float(_accs[-1])
+        if acc <= 0:
+            print(f"  ⏭️  {code} {s['name']}: 无模型/无精度, 跳过观察覆盖")
+            continue
+        results.append({
+            "symbol": code, "name": s["name"], "signal": "hold",
+            "score": 5.0, "confidence": 0, "confidence_level": "suspended",
+            "predicted_return": pred_ret, "horizon": horizon,
+            "source": "predict_only", "tier": "observe", "layer": "观察池",
+            "sector": s.get("sector", ""),
+            "accuracy": round(acc, 4), "direction_accuracy": round(acc, 4),
+            "h20d": h20d_r if h20d_r else {"predicted_return": 0, "direction_accuracy": 0.50, "horizon": "20d"},
+            "predict_time": datetime.now().isoformat(),
+            "observe_pool": s.get("pool", "observation"),
+        })
+    return results
 
 def _attach_latest_prices(results: list, stocks: list):
     """为每只标的附加最近收盘价（last交易日的close）"""

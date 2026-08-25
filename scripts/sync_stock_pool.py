@@ -107,8 +107,87 @@ def sync(master_pool: dict, stock_tiers: dict, dry_run: bool = False) -> tuple:
     return changed, 0
 
 
+# v4.7.0 P1-3: tier别名映射 master→stock (alpha≈bluechip, core≈core, bench≈flex)
+TIER_ALIAS = {"alpha": "bluechip", "core": "core", "bench": "flex"}
+
+
+def prune_and_remap(dry_run: bool = False) -> tuple:
+    """v4.7.0 P1-3: 以master_pool为权威重建stock_pool标的列表
+    - 删除master中不存在的标的(历史漂移)
+    - tier按别名映射重归类(alpha→bluechip, core→core, bench→flex)
+    - 保留tier的allocation等交易配置
+    返回 (removed_codes, moved_codes)
+    """
+    master = load_master_pool()
+    with open(STOCK_POOL, encoding="utf-8") as f:
+        stock_data = yaml.safe_load(f)
+    stock_tiers = stock_data.get("tiers", {})
+    if not isinstance(stock_tiers, dict):
+        print("❌ stock_pool.yaml 结构异常")
+        return [], []
+
+    removed, moved = [], []
+    for tname in list(stock_tiers.keys()):
+        tdata = stock_tiers[tname]
+        if not isinstance(tdata, dict):
+            continue
+        keep = []
+        for s in tdata.get("stocks", []) or []:
+            code = str(s.get("code", "")).zfill(6)
+            if code not in master:
+                removed.append(code)
+                continue
+            target_tier = TIER_ALIAS.get(master[code].get("tier", "core"), "flex")
+            if target_tier != tname:
+                moved.append((code, tname, target_tier))
+                continue
+            keep.append(s)
+        tdata["stocks"] = keep
+
+    # 移动标的放入目标tier
+    for code, _from, target in moved:
+        m = master[code]
+        entry = {"code": code, "name": m["name"], "sector": m["sector"], "score": m.get("score", 50)}
+        if target not in stock_tiers:
+            stock_tiers[target] = {"allocation": 0.10, "stocks": []}
+        stock_tiers[target].setdefault("stocks", []).append(entry)
+
+    # master有但stock完全缺失的
+    existing = set()
+    for tdata in stock_tiers.values():
+        if isinstance(tdata, dict):
+            for s in tdata.get("stocks", []) or []:
+                existing.add(str(s.get("code", "")).zfill(6))
+    for code, m in master.items():
+        if code in existing:
+            continue
+        target = TIER_ALIAS.get(m.get("tier", "core"), "flex")
+        if target not in stock_tiers:
+            stock_tiers[target] = {"allocation": 0.10, "stocks": []}
+        stock_tiers[target].setdefault("stocks", []).append(
+            {"code": code, "name": m["name"], "sector": m["sector"], "score": m.get("score", 50)})
+
+    if not dry_run:
+        with open(STOCK_POOL, "w", encoding="utf-8") as f:
+            stock_data["tiers"] = stock_tiers
+            yaml.dump(stock_data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    return removed, moved
+
+
 def main():
     dry_run = "--dry-run" in sys.argv
+
+    # v4.7.0 P1-3: --prune 模式 — 以master为权威重建stock_pool
+    if "--prune" in sys.argv:
+        print(f"🔧 双池重建(prune) — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        removed, moved = prune_and_remap(dry_run)
+        print(f"   删除漂移标的: {len(removed)}只 → {sorted(removed)}")
+        print(f"   tier重归类: {len(moved)}只 → {moved}")
+        if dry_run:
+            print("🔍 DRY RUN — 未写入")
+        else:
+            print("✅ stock_pool.yaml 已重建为master_pool投影")
+        return
 
     print(f"📋 双池同步工具 — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"  Master: {MASTER_POOL}")
