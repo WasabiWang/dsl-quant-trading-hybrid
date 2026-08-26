@@ -2117,6 +2117,10 @@ def _system_status_notes() -> str:
 
     lines.append("")
     return "\n".join(lines)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='盘前决策脚本')
     parser.add_argument('--market', type=str, required=True, choices=['a', 'hk'], help='市场类型：a=A股，hk=港股')
     parser.add_argument('--mode', type=str, default='morning', choices=['evening', 'morning'],
                         help='运行模式: evening=晚间预案预览(不执行交易), morning=早盘最终决策(执行交易)')
