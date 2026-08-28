@@ -597,6 +597,7 @@ function renderModels(d, filter) {
     const h20dAcc = matched.h20d_accuracy || (matched.h20d||{}).direction_accuracy || s.h20d_accuracy || 0;
     const pfRowStyleM = inPF ? 'background:rgba(245,158,11,.08);border-left:3px solid var(--accent)' : '';
     const pfBadgeM = inPF ? ' <span style="font-size:10px;background:var(--accent);color:#000;padding:1px 5px;border-radius:3px;font-weight:600" title="当前持仓">📦持仓</span>' : '';
+    const obsBadge = (s.pool_status === 'observation' || s.pool_status === 'orphan') ? ' <span style="font-size:10px;background:rgba(96,165,250,.15);color:#7db8ff;padding:1px 5px;border-radius:3px;font-weight:600" title="观察池标的 — 30天精度≥50%可自动回池">🔭观察</span>' : '';
     // v4.6.9d: P2-1 Correct列 → 显示 H5D方向正确数 (realized_correct), h20d_correct 移到tooltip
     const h5dCorrect = s.realized_correct || 0;
     const h20dInfo = (s.h20d_correct != null && s.h20d_total) ? (s.h20d_correct + '/' + s.h20d_total) : '';
@@ -613,7 +614,7 @@ function renderModels(d, filter) {
     }
     return '<tr style="' + pfRowStyleM + '">' +
       '<td>' + esc(s.symbol||'') + '</td>' +
-      '<td>' + esc(s.name||'') + pfBadgeM + '</td>' +
+      '<td>' + esc(s.name||'') + pfBadgeM + obsBadge + '</td>' +
       '<td style="color:' + h5dColor + '">' + h5dHtml + '</td>' +
       '<td>' + h20dDisplay(h20dAcc, acc) + '</td>' +
       '<td>' + statusHtml + '</td>' +

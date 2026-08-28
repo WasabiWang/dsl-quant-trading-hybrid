@@ -543,10 +543,28 @@ def get_calibration() -> Dict[str, Any]:
             if h20d_acc_val is not None:
                 calib_map[sym]["h20d_accuracy"] = round(h20d_acc_val, 4)
 
-    # v4.5.23: 用覆盖后的精度重新计算统计总数
-    total = len(calibrated)
-    retrain_urgent = sum(1 for s in calibrated if s.get("accuracy", 0) < thresholds["retrain_urgent"])
-    retrain_planned = sum(1 for s in calibrated if thresholds["retrain_urgent"] <= s.get("accuracy", 0) < thresholds["retrain_planned"])
+    # v4.7.1: 主池/观察池区分 — "总标的"只统计主池; 观察池行保留打标(精度仍追踪, 30天回池判定依赖)
+    master_syms = set(_stock_pool_meta_by_symbol().keys())
+    obs_syms = set()
+    _obs_cfg = safe_read_yaml(os.path.join(CONFIG_DIR, "observation_pool.yaml")) or {}
+    for s in (_obs_cfg.get("observation_pool") or []):
+        _sym = str(s.get("symbol", "")).zfill(6)
+        if _sym:
+            obs_syms.add(_sym)
+    master_rows = []
+    obs_count = 0
+    for row in calibrated:
+        if row["symbol"] in master_syms:
+            row["pool_status"] = "master"
+            master_rows.append(row)
+        else:
+            row["pool_status"] = "observation" if row["symbol"] in obs_syms else "orphan"
+            obs_count += 1
+
+    # v4.5.23: 用覆盖后的精度重新计算统计总数 (v4.7.1起仅统计主池)
+    total = len(master_rows)
+    retrain_urgent = sum(1 for s in master_rows if s.get("accuracy", 0) < thresholds["retrain_urgent"])
+    retrain_planned = sum(1 for s in master_rows if thresholds["retrain_urgent"] <= s.get("accuracy", 0) < thresholds["retrain_planned"])
     normal = total - retrain_urgent - retrain_planned
 
     overall = calib.get("overall_stats", {})
@@ -557,6 +575,7 @@ def get_calibration() -> Dict[str, Any]:
             "retrain_urgent": retrain_urgent,
             "retrain_planned": retrain_planned,
             "normal": normal,
+            "observation": obs_count,
         },
         "thresholds": thresholds,
         "overall": {
