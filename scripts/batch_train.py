@@ -271,14 +271,18 @@ def _sync_accuracy_to_calibration(results: list):
             if code not in sa:
                 sa[code] = {"name": r.get("name", code), "accuracies": [], "count": 0}
             s = sa[code]
-            s["accuracies"].append(round(new_acc, 4))
-            # P2: 保留最近50条，防止无界增长
-            if len(s["accuracies"]) > 50:
-                s["accuracies"] = s["accuracies"][-50:]
+            # v4.7.2 P2-3: 按training_hash去重 — 同一训练版本只记最后一次(与feedback_controller对齐),
+            # 修掉尾部x3~x8连续重复值(模型收敛后每日训练精度相同→sparkline失真)
+            _hash = r.get("model_hash", datetime.now().strftime("%Y%m%d"))
+            if _hash != s.get("last_training_hash", ""):
+                s["accuracies"].append(round(new_acc, 4))
+                # P2: 保留最近50条，防止无界增长
+                if len(s["accuracies"]) > 50:
+                    s["accuracies"] = s["accuracies"][-50:]
             s["last_accuracy"] = round(new_acc, 4)
             s["mean_accuracy"] = round(sum(s["accuracies"]) / len(s["accuracies"]), 4) if s["accuracies"] else 0
             s["count"] = len(s["accuracies"])
-            s["last_training_hash"] = r.get("model_hash", datetime.now().strftime("%Y%m%d"))
+            s["last_training_hash"] = _hash
             s["last_training_date"] = datetime.now().strftime("%Y-%m-%d")
             updated += 1
         cal["stock_accuracy"] = sa

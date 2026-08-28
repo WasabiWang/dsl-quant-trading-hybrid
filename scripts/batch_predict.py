@@ -93,6 +93,7 @@ USE_DYNAMIC_THRESHOLD = _dt_cfg["enabled"]
 
 # ── v4.5.3: h20d 信号阈值 ──
 H20D_SIGNAL_THRESHOLD = 0.05    # ±5% for 20day horizon
+H20D_BUY_MIN_ACCURACY = 0.40   # v4.7.2 P0-2: h20d自身方向精度<40% → 硬禁h20d买入
 H20D_MIN_ACCURACY = 0.50        # 最小方向精度
 
 # ── v4.5.3c: pool_fallback 信号权重抑制 ──
@@ -1292,43 +1293,87 @@ def main():
     total_hit = h5d_hit + pool_hit
     total_miss = h5d_miss + pool_miss
     
-    # ── h20d OOS方向精度补丁：将默认0.50替换为OOS真实精度 ──
+    # ── v4.7.2 h20d方向精度补丁 — 三层数据源 ──
+    # ① walk-forward OOS评估(权威, 严格样本外, 7天内新鲜优先)
+    # ② 每日增强训练报告(训练时计算, 新鲜fallback)
+    # ③ 保守默认0.50 + missing标记 (废除pool_mean_fallback假值 — 缺数据宁可保守拦截, 不伪造精度放行)
     h20d_accuracy_source = "default_0.5"
+
+    # ② 增强训练报告 (reports/predictor/prediction_enhanced_*.json, 每日16:30产出)
+    enhanced_h20d = {}
+    try:
+        enh_pattern = os.path.join(PROJECT_ROOT, "reports", "predictor", "prediction_enhanced_*.json")
+        enh_files = sorted(glob.glob(enh_pattern))
+        if enh_files:
+            with open(enh_files[-1], "r", encoding="utf-8") as f:
+                enh_data = json.load(f)
+            if isinstance(enh_data, dict):
+                for _code, _v in enh_data.items():
+                    if isinstance(_v, dict) and isinstance(_v.get("h20d"), dict):
+                        _da = _v["h20d"].get("direction_accuracy")
+                        if isinstance(_da, (int, float)) and _da > 0:
+                            enhanced_h20d[str(_code).zfill(6)] = round(float(_da), 4)
+    except Exception as e:
+        print(f"  ⚠️ 增强训练h20d读取失败: {e}")
+
+    # ① OOS评估 (7天内新鲜才优先; 否则降级为enhanced)
+    oos_per_stock = {}
+    oos_meta = {}
     oos_pattern = os.path.join(PROJECT_ROOT, "reports", "h20d_evaluation", "evaluation_h20d_oos_*.json")
     oos_files = sorted(glob.glob(oos_pattern))
     if oos_files:
-        latest_oos = oos_files[-1]
         try:
-            with open(latest_oos, "r", encoding="utf-8") as f:
-                oos_data = json.load(f)
-            per_stock = oos_data.get("per_stock", {})
-            patched = 0
-            for record in results:
-                code = record["symbol"]
-                if code in per_stock:
-                    oos_acc = per_stock[code]["direction_accuracy"]
-                    if "h20d" in record and record["h20d"] is not None:
-                        old_acc = record["h20d"].get("direction_accuracy", 0.50)
-                        record["h20d"]["direction_accuracy"] = oos_acc
-                        patched += 1
-            h20d_accuracy_source = "walk_forward_oos"
-            print(f"  🏷️ h20d精度补丁: {patched}只标的 ← {os.path.basename(latest_oos)}")
-            
-            # 预防措施: 检查未覆盖标的 → 用OOS池均值fallback
-            still_default = [r["symbol"] for r in results if r.get("h20d",{}).get("direction_accuracy", 0.50) == 0.50]
-            if still_default and per_stock:
-                oos_mean = round(sum(v["direction_accuracy"] for v in per_stock.values()) / len(per_stock), 4)
-                for r in results:
-                    if r.get("h20d",{}).get("direction_accuracy", 0) == 0.50:
-                        r["h20d"]["direction_accuracy"] = oos_mean
-                        r["h20d"]["accuracy_source"] = "pool_mean_fallback"
-                print(f"  📊 未覆盖{len(still_default)}只 ← OOS池均值{oos_mean:.1%}")
-            elif still_default:
-                print(f"  ⚠️ {len(still_default)}只无h20d精度(OOS文件损坏?) ← 保持默认0.50")
+            _oos_fresh = (time.time() - os.path.getmtime(oos_files[-1])) < 7 * 86400
+            if _oos_fresh:
+                with open(oos_files[-1], "r", encoding="utf-8") as f:
+                    oos_data = json.load(f)
+                oos_per_stock = {k: v.get("direction_accuracy")
+                                 for k, v in (oos_data.get("per_stock") or {}).items()
+                                 if isinstance(v, dict)}
+                oos_meta = {"file": os.path.basename(oos_files[-1]),
+                            "eval_date": oos_data.get("evaluation_date", "")}
+            else:
+                print(f"  ⚠️ OOS评估过期({os.path.basename(oos_files[-1])}, {int((time.time()-os.path.getmtime(oos_files[-1]))/86400)}天前) → 降级用增强训练h20d")
         except Exception as e:
-            print(f"  ⚠️ h20d OOS精度补丁失败: {e}")
-    else:
-        print("  ⚠️ 无OOS评估文件，h20d精度保持默认0.50")
+            print(f"  ⚠️ OOS评估文件读取失败: {e}")
+
+    patched_oos = patched_enh = missing = 0
+    for code, h20d in h20d_preds.items():
+        if not isinstance(h20d, dict):
+            continue
+        if code in oos_per_stock and isinstance(oos_per_stock[code], (int, float)):
+            h20d["direction_accuracy"] = round(float(oos_per_stock[code]), 4)
+            h20d["accuracy_source"] = "walk_forward_oos"
+            patched_oos += 1
+        elif code in enhanced_h20d:
+            h20d["direction_accuracy"] = enhanced_h20d[code]
+            h20d["accuracy_source"] = "enhanced_train_h20d"
+            patched_enh += 1
+        else:
+            h20d["direction_accuracy"] = 0.50
+            h20d["accuracy_source"] = "missing_conservative"
+            missing += 1
+    # records中的h20d与h20d_preds为同一对象引用(多数路径), 非引用路径同步一次
+    for record in results:
+        _h = record.get("h20d") if isinstance(record.get("h20d"), dict) else None
+        if _h is None:
+            continue
+        _src = _h.get("accuracy_source")
+        if _src in ("walk_forward_oos", "enhanced_train_h20d", "missing_conservative"):
+            continue
+        _code = record.get("symbol", "")
+        if _code in oos_per_stock and isinstance(oos_per_stock[_code], (int, float)):
+            _h["direction_accuracy"] = round(float(oos_per_stock[_code]), 4)
+            _h["accuracy_source"] = "walk_forward_oos"
+        elif _code in enhanced_h20d:
+            _h["direction_accuracy"] = enhanced_h20d[_code]
+            _h["accuracy_source"] = "enhanced_train_h20d"
+        else:
+            _h["direction_accuracy"] = 0.50
+            _h["accuracy_source"] = "missing_conservative"
+    h20d_accuracy_source = "walk_forward_oos" if patched_oos else ("enhanced_train_h20d" if patched_enh else "default_0.5")
+    _oos_label = f"({oos_meta.get('file','')})" if oos_meta.get("file") else ""
+    print(f"  🏷️ h20d精度补丁: OOS={patched_oos}只{_oos_label} | 增强训练={patched_enh}只 | 保守0.50={missing}只")
 
     # h20d信号统计
     h20d_returns = [r["predicted_return"] for r in h20d_preds.values() if r.get("predicted_return", 0) != 0]
@@ -1337,11 +1382,19 @@ def main():
         if r.get("predicted_return", 0) > H20D_SIGNAL_THRESHOLD
         and not _calibration_allows_buy(_calibration_stock_accuracy, code)
     ]
-    h20d_buy_signals = sum(
-        1 for code, r in h20d_preds.items()
+    # v4.7.2 P0-2: h20d自身方向精度<40% → 硬禁h20d买入 (真实h20d低于红线时保守拦截, 废除53%假值放行)
+    h20d_buy_blocked_by_own_accuracy = [
+        code for code, r in h20d_preds.items()
+        if r.get("predicted_return", 0) > H20D_SIGNAL_THRESHOLD
+        and r.get("direction_accuracy", 0) < H20D_BUY_MIN_ACCURACY
+    ]
+    h20d_buy_symbols = [
+        code for code, r in h20d_preds.items()
         if r.get("predicted_return", 0) > H20D_SIGNAL_THRESHOLD
         and _calibration_allows_buy(_calibration_stock_accuracy, code)
-    )
+        and r.get("direction_accuracy", 0) >= H20D_BUY_MIN_ACCURACY
+    ]
+    h20d_buy_signals = len(h20d_buy_symbols)
     h20d_sell_signals = sum(1 for r in h20d_preds.values() if r.get("predicted_return", 0) < -H20D_SIGNAL_THRESHOLD)
     h20d_hold_signals = sum(1 for r in h20d_preds.values() if -H20D_SIGNAL_THRESHOLD <= r.get("predicted_return", 0) <= H20D_SIGNAL_THRESHOLD)
     
@@ -1470,12 +1523,10 @@ def main():
         "failed": fail,
         "h20d_stocks": len(h20d_preds),
         "h20d_buy": h20d_buy_signals,
-        "h20d_buy_symbols": [
-            code for code, r in h20d_preds.items()
-            if r.get("predicted_return", 0) > H20D_SIGNAL_THRESHOLD
-            and _calibration_allows_buy(_calibration_stock_accuracy, code)
-        ],
+        "h20d_buy_symbols": h20d_buy_symbols,
         "h20d_buy_blocked_by_calibration": h20d_buy_blocked_by_calibration,
+        "h20d_buy_blocked_by_own_accuracy": h20d_buy_blocked_by_own_accuracy,
+        "h20d_buy_min_accuracy": H20D_BUY_MIN_ACCURACY,
         "h20d_sell": h20d_sell_signals,
         "h20d_sell_symbols": [code for code, r in h20d_preds.items() if r.get("predicted_return", 0) < -H20D_SIGNAL_THRESHOLD],
         "h20d_hold": h20d_hold_signals,

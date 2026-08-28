@@ -178,6 +178,7 @@ class RetrainQueueManager:
             return {"added": 0, "skipped": 0, "candidates": 0, "reason": f"calibration_invalid:{e}"}
 
         name_map = {}
+        pool_degraded = set()
         pool_path = PROJECT_ROOT / "config" / "master_stock_pool.yaml"
         try:
             with open(pool_path, "r", encoding="utf-8") as f:
@@ -186,6 +187,8 @@ class RetrainQueueManager:
                 symbol = str(item.get("symbol", "")).zfill(6)
                 if symbol:
                     name_map[symbol] = item.get("name", symbol)
+                    if item.get("degraded", False):
+                        pool_degraded.add(symbol)
         except Exception:
             pass
 
@@ -203,10 +206,14 @@ class RetrainQueueManager:
             if not isinstance(info, dict):
                 continue
             symbol = str(symbol).zfill(6)
+            # v4.7.2 P1-1: degraded标的(池内degraded标记或degraded_models)停止自动入队
+            # 与batch_train停训机制对齐, 堵住"入队→跳过→expired→再入队"死循环; 此类标的手动重训走Dashboard
+            if symbol in pool_degraded or symbol in degraded:
+                continue
             acc = info.get("last_accuracy", None)
             if not isinstance(acc, (int, float)):
                 continue
-            if acc >= planned and symbol not in degraded:
+            if acc >= planned:
                 continue
             if acc < critical:
                 priority = "critical"

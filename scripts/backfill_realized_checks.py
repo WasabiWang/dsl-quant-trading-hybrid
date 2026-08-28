@@ -150,6 +150,28 @@ def main():
     cal["overall_stats"] = ov
     cal["daily_records"] = daily_records
 
+    # v4.7.2 P1-2: 聚合daily_records → stock_accuracy.realized_correct/realized_total
+    # (Dashboard Correct列读的是stock_accuracy, 此前回填只写daily_records导致列全0)
+    if not args.dry_run:
+        agg = {}
+        for dr in daily_records:
+            for s in dr.get("stocks", []):
+                sym = str(s.get("symbol", "")).zfill(6)
+                if not sym or not s.get("realized_checked", False):
+                    continue
+                a = agg.setdefault(sym, {"c": 0, "t": 0})
+                a["t"] += 1
+                if s.get("realized_correct", False):
+                    a["c"] += 1
+        stock_accuracy = cal.get("stock_accuracy", {})
+        for sym, a in agg.items():
+            sa = stock_accuracy.get(sym)
+            if isinstance(sa, dict):
+                sa["realized_correct"] = a["c"]
+                sa["realized_total"] = a["t"]
+        cal["stock_accuracy"] = stock_accuracy
+        print(f"📊 已聚合 {len(agg)} 只标的 realized_correct → stock_accuracy (Dashboard Correct列)")
+
     print(f"回填完成: 新增{checked}条 | 正确{correct} | 精度{correct / max(checked, 1):.1%}")
     if not args.dry_run:
         cal["last_updated"] = datetime.now().isoformat()
