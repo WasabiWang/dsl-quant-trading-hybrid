@@ -83,7 +83,9 @@ def evaluate_stock(code: str, name: str) -> dict:
 
         # 5. 所有行可用，只需target有效
         all_idx = feats.index.tolist()
-        if len(all_idx) < BACKTEST_DAYS + MIN_TRAIN_SAMPLES:
+        # v4.7.2 P2-1: 放宽总行数要求 — 原BACKTEST_DAYS+MIN_TRAIN_SAMPLES(930行)导致次新股(如688525 2022年上市仅883交易日)永远无法评估
+        # 新要求: 至少能组成1个窗口的测试期+前置训练样本; 窗口循环内部已有MIN_TRAIN_SAMPLES与MIN_OOS_PREDICTIONS双重门槛保证质量
+        if len(all_idx) < MIN_TRAIN_SAMPLES + WINDOW_DAYS:
             return None
 
         # 6. 回测期 = 最后 BACKTEST_DAYS 行
