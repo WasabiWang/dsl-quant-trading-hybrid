@@ -19,6 +19,11 @@ import pandas as pd
 import joblib
 import yaml
 
+# v4.7.3修复: 限制OpenMP线程数, 降低与torch/libomp双runtime的死锁窗口
+# (历史: 训练进程间歇性0%CPU挂起, 采样栈kmp_flag_64::wait barrier死锁)
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("OMP_NUM_THREADS", "8")
+
 warnings.filterwarnings("ignore")
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -483,13 +488,20 @@ def train_single_stock(code, name, tier: str = "core"):
             print(f"  ⏱️ 自动缩窗: {len(kline)}→{len(df)}天 (3年窗口, 防过拟合)")
 
         # v4.5.18 P1: ST股过滤 - 从akshare获取实时ST列表,ST股跳过训练
+        # v4.7.3修复: 东财接口无超时会无限挂起 → socket默认超时15s兜底
         try:
-            import akshare as _ak
-            _st_df = _ak.stock_zh_a_st_em()
-            if _st_df is not None and len(_st_df) > 0:
-                if code in _st_df['代码'].values:
-                    print(f"  🚫 {code} {name} 当前为ST股,跳过训练")
-                    return None
+            import socket
+            _old_tm = socket.getdefaulttimeout()
+            socket.setdefaulttimeout(15)
+            try:
+                import akshare as _ak
+                _st_df = _ak.stock_zh_a_st_em()
+                if _st_df is not None and len(_st_df) > 0:
+                    if code in _st_df['代码'].values:
+                        print(f"  🚫 {code} {name} 当前为ST股,跳过训练")
+                        return None
+            finally:
+                socket.setdefaulttimeout(_old_tm)
         except Exception:
             pass
 
@@ -813,8 +825,13 @@ def train_single_stock(code, name, tier: str = "core"):
         joblib.dump(train_metadata, os.path.join(model_dir, "model_metadata.pkl"))
         
         # v4.6.5: Transformer深度学习模型（并行训练）
+        # v4.7.3 修复: features_train_only 从未定义(NameError) → 该分支一直被跳过
+        # 用训练段(时序切分后+特征选择后)构造输入; train_transformer 内部自行时序划分
         try:
             from core.transformer_model import train_transformer
+            _tf_cols = [c for c in feature_cols if c in train.columns]
+            features_train_only = train[_tf_cols].copy()
+            features_train_only["target"] = train["target"].values
             tf_result = train_transformer(features_train_only, target_col="target",
                                           model_dir=model_dir, code=code, verbose=False)
             if tf_result:

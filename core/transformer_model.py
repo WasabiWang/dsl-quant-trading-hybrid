@@ -23,6 +23,12 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
+# v4.7.3修复: 同进程内 LightGBM(homebrew libomp) 与 torch(自带libomp.dylib)
+# 双OpenMP runtime冲突 → 间歇性barrier死锁(0% CPU挂起, 采样栈kmp_flag_64::wait)。
+# 官方workaround: 允许重复runtime + 限制torch线程数, 降低死锁窗口。
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+
 warnings.filterwarnings("ignore")
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -34,6 +40,11 @@ try:
     import torch.nn as nn
     import torch.optim as optim
     from torch.utils.data import DataLoader, TensorDataset
+    # v4.7.3修复: 限线程防与LightGBM的OpenMP运行时互锁死锁 (CPU友好: 2线程足够)
+    try:
+        torch.set_num_threads(1)  # v4.7.3: team=1绕过libomp双runtime barrier死锁
+    except Exception:
+        pass
     HAS_TORCH = True
 except ImportError:
     print("⚠️ PyTorch未安装, Transformer模型不可用. pip install torch")

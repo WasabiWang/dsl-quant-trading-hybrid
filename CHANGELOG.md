@@ -1,3 +1,29 @@
+# v4.7.3.1 (2026-08-31) — Transformer 分支双 bug 修复
+
+训练时 Transformer 一直被静默跳过 + 预测侧特征未定义，两个 NameError 同一链路。
+
+## 🔴 根因 1: 训练侧 features_train_only 从未定义
+- train_predictor_v3.py Transformer 分支引用 `features_train_only`（从未赋值）→
+  NameError 被 except 吞掉 → Transformer 自 v4.6.5 引入以来**从未成功训练过**
+- 修复: 用训练段(train split, 特征选择后)构造输入, train_transformer 内部自行时序划分
+
+## 🔴 根因 2: torch 与 LightGBM 双 OpenMP runtime 冲突死锁
+- 修复根因1后训练进程间歇性 0% CPU 挂起（采样栈: torch cos 算子 →
+  __kmpc_fork_call → __kmp_join_barrier 死锁）
+- 机理: LightGBM 用 homebrew libomp, torch 自带 torch/lib/libomp.dylib, 同进程双
+  runtime 符号交错 → barrier 死锁 (macOS 经典问题)
+- 修复: KMP_DUPLICATE_LIB_OK=TRUE + torch.set_num_threads(1) (team=1 时 barrier
+  无需等待其他 worker) + train_predictor_v3 OMP_NUM_THREADS=8 限线程
+- 验证: 600519 端到端 9.2s 完成, dir_acc=55.32%, checkpoint 落盘
+
+## 🔴 根因 3: 预测侧 features_df_raw 从未定义 (同链路的第二处)
+- batch_predict.py 引用 `features_df_raw`（从未赋值）→ 即使有 checkpoint 也会
+  NameError 被静默吞 → Transformer 预测永远 hold
+- 修复: 预测时用 train_predictor_v3.build_features 在最新K线上重建特征帧
+- 验证: checkpoint 加载 → 127行×53维特征 → 预测输出真实信号(sell/-0.114/0.636)
+
+## 🛡️ 顺带: akshare ST过滤网络挂起防护
+- stock_zh_a_st_em() 无超时会无限挂起(东财封锁间歇性触发) → socket 默认超时15s兜底
 # v4.7.3 (2026-08-31) — 信号质量监控三件套 (QuantMind 源码级移植)
 
 基于 QuantMind 开源版源码对照分析 (P0/P1/P2 改造方案, James 批准执行)。

@@ -1124,7 +1124,13 @@ def main():
                 model_dir = os.path.join(PROJECT_ROOT, "models", code)
                 tf_data = load_transformer(model_dir, code)
                 if tf_data:
-                    tf_pred = predict_transformer(tf_data, features_df_raw)
+                    # v4.7.3修复: features_df_raw从未定义(NameError被静默吞) →
+                    # 用训练特征管线(build_features)在最新K线上重建特征帧后预测
+                    _tf_kline = fetch_kline(code)
+                    if _tf_kline is not None and len(_tf_kline) >= 30:
+                        from scripts.train_predictor_v3 import build_features as _tf_build_features
+                        features_df_raw = _tf_build_features(_tf_kline)
+                        tf_pred = predict_transformer(tf_data, features_df_raw)
                     if tf_pred.get("signal") != "hold":
                         # v4.6.9f P1-3: 动态权重
                         _tf_acc = float(tf_data.get("direction_accuracy", 0.5) or 0.5)
