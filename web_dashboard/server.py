@@ -390,6 +390,13 @@ async def api_blackswan():
     return await asyncio.get_event_loop().run_in_executor(_BLOCKING_EXECUTOR, get_blackswan)
 
 
+@app.get("/api/rank-ic")
+async def api_rank_ic():
+    """v4.7.3: 截面Rank IC监控API"""
+    from data_adapter import get_rank_ic
+    return await asyncio.get_event_loop().run_in_executor(_BLOCKING_EXECUTOR, get_rank_ic)
+
+
 @app.get("/api/portfolio")
 async def api_portfolio():
     """持仓API"""

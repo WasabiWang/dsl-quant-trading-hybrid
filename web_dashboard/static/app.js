@@ -535,6 +535,41 @@ function renderPredictions(d) {
 }
 
 // ── Models ──
+// v4.7.3: 截面Rank IC面板
+function renderRankIC() {
+  fetch('/api/rank-ic').then(function(r){ return r.json(); }).then(function(ic){
+    const body = document.getElementById('model-ic-body');
+    const badge = document.getElementById('model-ic-badge');
+    if (!body) return;
+    const s = ic.summary || {};
+    if (!s || !s.n_days) { body.innerHTML = '<div class="empty-state"><div class="empty-icon">📭</div>暂无IC数据 (rank_ic_monitor 尚未运行)</div>'; return; }
+    const st = s.drift_status || 'healthy';
+    const stMap = {healthy:['#0dc9a2','✅ healthy'], degraded:['#ffb020','⚠️ degraded'], critical:['#ff4747','🚨 critical'], drifted:['#ffb020','🟡 drifted'], data_issue:['#ff4747','🔴 data_issue']};
+    const conf = stMap[st] || ['#888', st];
+    badge.innerHTML = '<span style="color:' + conf[0] + '">' + conf[1] + '</span>';
+    const series = (ic.series||[]).slice(-30);
+    let spark = '';
+    if (series.length >= 5) {
+      const vals = series.map(function(x){ return x.rank_ic; });
+      const mn = Math.min.apply(null, vals), mx = Math.max.apply(null, vals), rng = (mx-mn)||1;
+      const w = 300, h = 40, n = vals.length;
+      let pts = '';
+      vals.forEach(function(v, i){ pts += (i/(n-1)*w).toFixed(1) + ',' + (h - (v-mn)/rng*h).toFixed(1) + ' '; });
+      spark = '<svg width="300" height="44" style="background:rgba(255,255,255,.03);border-radius:6px;margin-top:6px">' +
+        '<line x1="0" y1="' + (h-(0-mn)/rng*h) + '" x2="' + w + '" y2="' + (h-(0-mn)/rng*h) + '" stroke="#444" stroke-dasharray="3,3"/>' +
+        '<polyline points="' + pts.trim() + '" fill="none" stroke="' + conf[0] + '" stroke-width="1.8"/></svg>';
+    }
+    const reasons = (s.drift_reasons||[]).map(function(x){ return '<div style="color:var(--danger);font-size:11px;margin:2px 0">⚠️ ' + esc(x) + '</div>'; }).join('');
+    body.innerHTML =
+      '<div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">' +
+      '<div><div class="value ' + (s.rank_ic_mean>=0?'green':'red') + '">' + (s.rank_ic_mean==null?'—':s.rank_ic_mean.toFixed(4)) + '</div><div class="label">Rank IC 均值(' + s.n_days + '日)</div></div>' +
+      '<div><div class="value ' + (s.recent20_mean==null||s.recent20_mean>=0?'green':'red') + '">' + (s.recent20_mean==null?'—':s.recent20_mean.toFixed(4)) + '</div><div class="label">近20日均值</div></div>' +
+      '<div><div class="value">' + (s.rank_icir_30d==null?'—':s.rank_icir_30d.toFixed(3)) + '</div><div class="label">ICIR(30日)</div></div>' +
+      '<div><div class="value">' + (s.updated_at||'').slice(0,16) + '</div><div class="label">更新时间</div></div>' +
+      '</div>' + spark + reasons;
+  }).catch(function(e){ console.error('rank-ic fetch failed', e); });
+}
+
 function renderModels(d, filter) {
   filter = filter || 'all';
   const cal = d.calibration || {};
@@ -546,6 +581,7 @@ function renderModels(d, filter) {
     '<div class="card card-sm"><h3>🔴 急迫重训</h3><div class="value red">' + (sum.retrain_urgent||0) + '</div></div>' +
     '<div class="card card-sm"><h3>🟡 计划重训</h3><div class="value yellow">' + (sum.retrain_planned||0) + '</div></div>' +
     '<div class="card card-sm"><h3>🟢 正常</h3><div class="value green">' + (sum.normal||0) + '</div></div>';
+  renderRankIC();
 
   const stocks = cal.stocks || [];
   const tbody = document.querySelector('#model-table tbody');

@@ -334,6 +334,19 @@ def get_system_status() -> Dict[str, Any]:
         "profit_factor": bt_perf.get("profit_factor", 0),
         "sharpe_ratio": bt_perf.get("sharpe_ratio", 0),
         "max_drawdown": abs(bt_perf.get("max_drawdown_pct", 0)),
+        # v4.7.3: 截面Rank IC状态
+        "rank_ic": (get_rank_ic().get("summary") or {}),
+    }
+
+
+def get_rank_ic() -> Dict[str, Any]:
+    """v4.7.3 P0: 截面Rank IC监控数据 (confidence_data/rank_ic_series.json)"""
+    data = safe_read_json(os.path.join(CONFIDENCE_DIR, "rank_ic_series.json")) or {}
+    return {
+        "summary": data.get("summary", {}),
+        "thresholds": data.get("thresholds", {}),
+        "series": data.get("series", [])[-120:],  # 最近120个交易日
+        "updated_at": data.get("updated_at", ""),
     }
 
 

@@ -73,6 +73,33 @@ REG_ALPHA_DEFAULT = 0.5          # L1正则化
 REG_LAMBDA_DEFAULT = 0.5         # L2正则化
 MIN_CHILD_SAMPLES_DEFAULT = 20   # 叶子最小样本数
 MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
+
+# v4.7.3 P2c: 滚动权重快照目录 (refresh_ensemble_weights.py 产出)
+WEIGHT_SNAPSHOT_DIR = os.path.join(PROJECT_ROOT, "reports", "predictor", "weight_snapshots")
+WEIGHT_SNAPSHOT_MAX_AGE_H = 14 * 24  # 快照超过14天则退化当日corr权重
+
+
+def _load_weight_snapshot(code: str):
+    """读取滚动权重快照 {code}.json; 过期/缺失返回 None (退化当日corr权重)。"""
+    try:
+        p = os.path.join(WEIGHT_SNAPSHOT_DIR, f"{code}.json")
+        if not os.path.exists(p):
+            return None
+        age_h = (__import__("time").time() - os.path.getmtime(p)) / 3600
+        if age_h > WEIGHT_SNAPSHOT_MAX_AGE_H:
+            return None
+        with open(p, "r", encoding="utf-8") as f:
+            snap = json.load(f)
+        w = snap.get("weights") or {}
+        if not w or not all(k in w for k in ("lgb", "xgb", "clf")):
+            return None
+        out = {"lgb": float(w["lgb"]), "xgb": float(w["xgb"]), "clf": float(w["clf"]),
+               "cb": float(w.get("cb", 0.0)), "n_reports": int(snap.get("n_reports", 0))}
+        if out["n_reports"] < 5:
+            return None  # 样本太少不可靠
+        return out
+    except Exception:
+        return None
 PRED_DIR = os.path.join(PROJECT_ROOT, "reports", "predictor")
 TRAIN_LOG_DIR = os.path.join(PROJECT_ROOT, "reports", "predictor")
 os.makedirs(PRED_DIR, exist_ok=True)
@@ -373,7 +400,11 @@ def build_features(df, use_aggressive: bool = False):
 # Phase 3: Optuna超参搜索
 # ============================================================
 def optimize_lgb(X_train, y_train, X_val, y_val):
-    """用Optuna搜索LightGBM最优超参"""
+    """用Optuna搜索LightGBM最优超参
+    v4.7.3 P2: 目标函数从二元方向精度升级为回归IC corr(y_pred, y_val)
+    (预测收益与真实收益的Pearson相关) — 幅度感知, 与截面Rank IC哲学对齐;
+    对时间序列有效(逐股模型无截面, 不能用ICIR)。
+    """
     if not HAS_OPTUNA:
         return None
 
@@ -397,7 +428,11 @@ def optimize_lgb(X_train, y_train, X_val, y_val):
         model.fit(X_train, y_train, eval_set=[(X_val, y_val)],
                   callbacks=[lgb.early_stopping(20, verbose=False)])
         y_pred = model.predict(X_val)
-        return np.mean((y_pred > 0) == (y_val > 0))
+        # v4.7.3: 回归IC目标 (幅度感知)
+        y_val_arr = np.asarray(y_val, dtype=np.float64)
+        if np.std(y_pred) < 1e-12 or np.std(y_val_arr) < 1e-12:
+            return -1.0
+        return float(np.corrcoef(y_pred, y_val_arr)[0, 1])
 
     study = optuna.create_study(direction="maximize")
     study.optimize(objective, n_trials=OPTUNA_TRIALS, show_progress_bar=False)
@@ -655,24 +690,49 @@ def train_single_stock(code, name, tier: str = "core"):
         clf_probas_val = clf_model.predict_proba(X_val)[:, 1]
         clf_direction_val = clf_model.predict(X_val)
 
+        # v4.7.3 P2: 集成质量改用回归IC corr (幅度感知, 与Rank IC哲学对齐)
+        # 旧: eff_acc=max(二元方向精度, 1-精度) → 预测+10%与+0.1%同分;
+        # 新: eff=max(corr(pred, y), 0), polarity=sign(corr) → 幅度单调性入权重
+        def _eff_quality(preds, y):
+            preds = np.asarray(preds, dtype=np.float64)
+            y = np.asarray(y, dtype=np.float64)
+            if np.std(preds) < 1e-12 or np.std(y) < 1e-12:
+                return 0.0, 1
+            c = float(np.corrcoef(preds, y)[0, 1])
+            if not np.isfinite(c):
+                return 0.0, 1
+            return (-c, -1) if c < 0 else (c, 1)
+
+        lgb_eff_acc, lgb_polarity = _eff_quality(lgb_preds_val, y_val_raw)
+        xgb_eff_acc, xgb_polarity = _eff_quality(xgb_preds_val, y_val_raw)
+        cb_eff_acc, cb_polarity = _eff_quality(cb_preds_val, y_val_raw) if cb_model else (0.0, 1)
+        clf_eff_acc, clf_polarity = _eff_quality(clf_probas_val, y_val_raw)
+        _cb_corr_pos = cb_model is not None and cb_eff_acc > 0
+
+        # 二元方向精度仅用于报告展示 (权重已改用corr)
         lgb_acc = np.mean((lgb_preds_val > 0) == (y_val_raw > 0))
         xgb_acc = np.mean((xgb_preds_val > 0) == (y_val_raw > 0))
         clf_acc = np.mean(clf_direction_val == y_val_bin)
-        lgb_polarity = -1 if lgb_acc < 0.5 else 1
-        xgb_polarity = -1 if xgb_acc < 0.5 else 1
-        clf_polarity = -1 if clf_acc < 0.5 else 1
-        cb_polarity = -1 if cb_model and cb_acc < 0.5 else 1
-        lgb_eff_acc = max(lgb_acc, 1 - lgb_acc)
-        xgb_eff_acc = max(xgb_acc, 1 - xgb_acc)
-        clf_eff_acc = max(clf_acc, 1 - clf_acc)
-        cb_eff_acc = max(cb_acc, 1 - cb_acc) if cb_model else 0.0
 
         # 自适应权重: 精度归一化 (含CatBoost)
-        total_acc = lgb_eff_acc + xgb_eff_acc + clf_eff_acc + cb_eff_acc + 1e-6
-        w_lgb = lgb_eff_acc / total_acc
-        w_xgb = xgb_eff_acc / total_acc
-        w_clf = clf_eff_acc / total_acc
-        w_cb = cb_eff_acc / total_acc if cb_model else 0.0
+        # v4.7.3 P2c: 优先读滚动权重快照 (refresh_ensemble_weights.py 产出),
+        # 平滑单日验证集噪声 (QuantMind 指数衰减同款思路); 无快照退化当日corr权重。
+        _snap_w = _load_weight_snapshot(code)
+        if _snap_w:
+            # 快照覆盖 lgb/xgb/clf (历史有精度记录); cb 无历史 → 用当日 corr
+            # 质量按比例参与 (快照总权重=1.0, cb按当日质量叠加)
+            _s_lgb, _s_xgb, _s_clf = _snap_w.get("lgb", 0.0), _snap_w.get("xgb", 0.0), _snap_w.get("clf", 0.0)
+            _cb_share = cb_eff_acc if cb_model else 0.0
+            _tot = _s_lgb + _s_xgb + _s_clf + _cb_share + 1e-6
+            w_lgb, w_xgb, w_clf = _s_lgb / _tot, _s_xgb / _tot, _s_clf / _tot
+            w_cb = _cb_share / _tot if cb_model else 0.0
+            print(f"  🔄 权重快照生效: LGBM={w_lgb:.2f} XGB={w_xgb:.2f} Clf={w_clf:.2f} CatB={w_cb:.2f} (n={_snap_w.get('n_reports', '?')})")
+        else:
+            total_acc = lgb_eff_acc + xgb_eff_acc + clf_eff_acc + cb_eff_acc + 1e-6
+            w_lgb = lgb_eff_acc / total_acc
+            w_xgb = xgb_eff_acc / total_acc
+            w_clf = clf_eff_acc / total_acc
+            w_cb = cb_eff_acc / total_acc if cb_model else 0.0
 
         # 信号融合:验证集预测值 + 验证集权重
         lgb_signal_val = ((lgb_preds_val > 0).astype(float) * 2 - 1) * lgb_polarity
@@ -713,7 +773,7 @@ def train_single_stock(code, name, tier: str = "core"):
         latest_cb_adj = latest_cb * cb_polarity
         latest_clf_score = (latest_clf_p - 0.5) * clf_polarity
         reg_pred = (w_lgb * latest_lgb_adj + w_xgb * latest_xgb_adj) / max(w_lgb + w_xgb, 1e-6)
-        if cb_model and cb_acc > 0:
+        if cb_model and _cb_corr_pos:
             reg_pred = (reg_pred * (w_lgb + w_xgb) + w_cb * latest_cb_adj) / reg_w
 
         # 分类器信号加权融合
@@ -806,6 +866,8 @@ def train_single_stock(code, name, tier: str = "core"):
             "lgb_accuracy": round(float(lgb_acc), 4),
             "xgb_accuracy": round(float(xgb_acc), 4),
             "clf_accuracy": round(float(clf_acc), 4),  # Phase 2
+            # v4.7.3 P2c: 补充cb_accuracy供滚动权重快照积累历史
+            "cb_accuracy": round(float(cb_acc), 4) if cb_model else None,
             "cv_clf_accuracy": round(float(cv_clf_accuracy), 4),  # Phase 2
             "ensemble_weights": {"lgb": round(float(w_lgb), 3), "xgb": round(float(w_xgb), 3), "clf": round(float(w_clf), 3)},
             "train_years": TRAIN_YEARS,

@@ -1,3 +1,40 @@
+# v4.7.3 (2026-08-31) — 信号质量监控三件套 (QuantMind 源码级移植)
+
+基于 QuantMind 开源版源码对照分析 (P0/P1/P2 改造方案, James 批准执行)。
+
+## 🟢 P0: 生产 Rank IC/ICIR 监控
+- 新增 scripts/rank_ic_monitor.py: 全量回填 realized_return(含hold, +1488条) + 每日截面
+  Spearman/Pearson IC + 漂移判定(移植 QuantMind get_model_quality 规则) + 噪声校准阈值
+- 输出 confidence_data/rank_ic_series.json (67个交易日, 2026-05-04~08-18)
+- 校准: 35只池单日IC std≈0.32 → 滚动20日均值为判级单位; degraded(<0)→新开仓限1只,
+  critical(<-0.10)→暂停新开仓; 阈值可配 adaptive_params.rank_ic
+- morning_decision.py: plan_trades 集成 IC gate + _system_status_notes 新增 IC/特征漂移状态行
+- Dashboard: /api/rank-ic 端点 + status.rank_ic + 模型页 IC 面板(30日sparkline+漂移badge)
+- cron: 截面Rank IC监控(15:40) bf289f87
+- 首跑结论: 近20日均值-0.084 (⚠️degraded, 与7/30美伊战争后信号失效期吻合)
+
+## 🟡 P1: 特征漂移检测 (双通道PSI)
+- 新增 scripts/feature_drift_monitor.py: 移植 QuantMind compute_psi_drift
+  level_psi(水平PSI) + rank_disp(截面身份级rank位移) 双通道 + 噪声本底校准
+- 噪声本底 = 历史相邻等长窗对(4对)rank_disp中位数; severe=max(0.20,2.5×本底),
+  medium=max(0.12,1.8×本底); 良性量纲膨胀(benign_scale)不告警
+- 实证: 固定阈值0.10产生47/75假阳性; 校准后 stable(0 severe/1 medium) — 与QuantMind
+  2026-08误报教训一致; 7/30后特征输入侧无显著结构变化(IC失效是预测力问题非输入漂移)
+- 输出 data/monitoring/feature_drift.json | cron: 特征漂移监控(15:45) 86803494
+
+## 🟡 P2: 集成权重动态化 + Optuna 目标升级
+- train_predictor_v3.py: Optuna 目标函数 二元方向精度 → 回归IC corr(y_pred,y_val)
+  (逐股时间序列无截面, 幅度感知); 集成权重 eff_acc → max(corr,0) 有效质量
+- 新增 scripts/refresh_ensemble_weights.py: 聚合近30天增强报告子模型精度, 指数衰减
+  (exp(-d/10))产出滚动权重快照 → 训练时优先消费(14天内+≥5样本, cb无历史用当日corr)
+- 报告新增 cb_accuracy 字段(积累历史) | cron: 集成权重快照刷新(15:48) e80e91da
+- 验证: 600519 端到端训练通过(快照生效 LGBM=0.34/XGB=0.32/Clf=0.34); L0+L1 全绿;
+  今晚16:00训练起新权重生效, 明日对比精度基线
+
+## 🧪 测试
+- tests/test_rank_ic.py: 11项 (spearman边界/漂移分级/回填幂等)
+- tests/test_feature_drift.py: 8项 (PSI语义/rank位移双通道/本底校准判级)
+- L0 单元 + L1 组件全绿 | audit_cron_delivery 0项问题
 # v4.6.9i (2026-08-15) — 风控闭环批次一（全量审计修复批1/4）
 
 基于 v4.6.9h.2 全量审计（8报告, 总评67/100, 7 P0），本批修复全部P0级风控问题：

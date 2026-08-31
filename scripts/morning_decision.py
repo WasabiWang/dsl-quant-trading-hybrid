@@ -230,6 +230,19 @@ LAST_DAILY_PREDICT_FRESHNESS = {
 }
 
 
+def load_rank_ic_status() -> dict:
+    """v4.7.3 P0: 读取截面Rank IC监控状态 (rank_ic_monitor.py 产出)。
+    返回 summary dict; 文件缺失/异常时返回 healthy 兜底(不阻塞主流程)。
+    """
+    _path = os.path.join(PROJECT_ROOT, "confidence_data", "rank_ic_series.json")
+    try:
+        with open(_path, encoding="utf-8") as _f:
+            _d = json.load(_f)
+        return (_d.get("summary") or {}) if isinstance(_d, dict) else {}
+    except Exception:
+        return {}
+
+
 def load_daily_predictions():
     """v4.5.3c 加载 batch_predict 产出的每日ML预测缓存，含时效校验
     v4.5.13: 注入h20d信号到每个预测的h20d dict中，供plan_trades交叉验证
@@ -1597,6 +1610,20 @@ def plan_trades(alpha_scores, daily_predictions, final_position, trader=None,
     current_count = len(current_positions)
     sell_count = len(sell_candidates)
     max_new_buys = MAX_POSITIONS - (current_count - sell_count)
+
+    # v4.7.3 P0: 截面Rank IC质量gate (35只池, 滚动20日均值, 滞后5日兑现)
+    #   degraded: 近20日均值<0 → 新开仓限1只 (警戒, 不阻止加仓)
+    #   critical: 近20日均值<critical_mean → 暂停新开仓 (仅允许减仓/平仓)
+    _ic = load_rank_ic_status()
+    _ic_status = _ic.get("drift_status", "healthy")
+    _ic_recent = _ic.get("recent20_mean")
+    _ic_critical = float((_ic.get("thresholds") or {}).get("critical_mean", -0.10))
+    if _ic_status == "critical" and isinstance(_ic_recent, (int, float)):
+        print(f"  🚨 截面IC critical: recent20={_ic_recent:.4f}<{_ic_critical} → 暂停新开仓(仅减仓)")
+        max_new_buys = 0
+    elif _ic_status == "degraded" and isinstance(_ic_recent, (int, float)):
+        print(f"  ⚠️ 截面IC degraded: recent20={_ic_recent:.4f} → 新开仓上限1只")
+        max_new_buys = min(max_new_buys, 1)
     
     if buy_candidates:
         # v4.5.9b: 按Tier升序+评分降序排列，确保双确认优先
@@ -2114,6 +2141,44 @@ def _system_status_notes() -> str:
 
     # 4. 数据源降级 (已知常态: 东财push2封锁→新浪/同花顺)
     lines.append("- ℹ️ 数据源: 东财push2封锁(已知)→新浪/同花顺降级链, 降级属设计内行为")
+
+    # 5. v4.7.3: 截面Rank IC状态
+    try:
+        _ic = load_rank_ic_status()
+        _ic_st = _ic.get("drift_status", "healthy")
+        _ic_rm = _ic.get("recent20_mean")
+        _ic_icir = _ic.get("rank_icir_30d")
+        if _ic_st == "healthy":
+            _ic_icon = "✅"
+        elif _ic_st == "degraded":
+            _ic_icon = "⚠️"
+        elif _ic_st == "drifted":
+            _ic_icon = "🟡"
+        elif _ic_st == "critical":
+            _ic_icon = "🚨"
+        else:
+            _ic_icon = "🔴"
+        _ic_line = f"- {_ic_icon} 截面Rank IC: {_ic_st}"
+        if _ic_rm is not None:
+            _ic_line += f", 近20日均值={_ic_rm:.4f}"
+        if _ic_icir is not None:
+            _ic_line += f", ICIR30={_ic_icir}"
+        lines.append(_ic_line)
+    except Exception:
+        pass
+
+    # 6. v4.7.3: 特征漂移状态 (feature_drift_monitor.py)
+    try:
+        _fd_path = os.path.join(PROJECT_ROOT, "data", "monitoring", "feature_drift.json")
+        if os.path.exists(_fd_path):
+            with open(_fd_path, encoding="utf-8") as _f:
+                _fd = json.load(_f)
+            _fd_ov = _fd.get("overall", "stable")
+            _fd_icon = {"stable": "✅", "warning": "🟡", "severe": "🚨"}.get(_fd_ov, "🔴")
+            _fd_line = f"- {_fd_icon} 特征漂移: {_fd_ov} (severe={_fd.get('drift', {}).get('severe', 0)}, medium={_fd.get('drift', {}).get('medium', 0)}, 更新{str(_fd.get('updated_at', '?'))[:10]})"
+            lines.append(_fd_line)
+    except Exception:
+        pass
 
     lines.append("")
     return "\n".join(lines)
