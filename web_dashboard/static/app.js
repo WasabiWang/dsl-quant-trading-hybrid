@@ -153,7 +153,7 @@ async function refreshAll() {
       const v = DATA.status ? (DATA.status.version || '') : '';
       _versionCached = v;
       const badge = document.getElementById('version-badge');
-      if (badge && v) badge.textContent = 'v' + v;
+      if (badge && v) badge.textContent = (String(v).startsWith('v') ? v : 'v' + v);
     }
     document.getElementById('last-refresh').textContent = new Date().toLocaleTimeString();
     _lastDataTime = Date.now();
