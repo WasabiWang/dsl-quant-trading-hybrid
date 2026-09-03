@@ -530,14 +530,17 @@ class RiskManager:
 
     def check_sector_concentration(
         self, planned_buys: List[dict], current_positions: List[dict],
-        stock_pool: List[dict]
+        stock_pool: List[dict], equity: float = None
     ) -> dict:
         """检查行业/概念集中度（基于市值而非计数）
 
         计算方式:
-        - 集中度 = 某行业持仓总市值 / 组合总持仓市值
-        - 组合总持仓市值 = 所有当前持仓市值 + 所有计划买入金额
-        - 避免小仓位与重仓位权重相等的计数偏差
+        - v4.7.4修复: 分母默认=组合总权益(现金+持仓), 与单票15%/行业25%配额
+          语义一致; equity为None时回退旧口径(持仓市值+计划买入)
+        - 旧口径缺陷: 高现金组合下任何稍大买单都会假阳性超标
+          (例: 五粮液计划买入70,820 / (持仓139,300+计划70,820) = 34%>
+          25%被拦, 但占权益仅6.96%)
+        - 集中度 = 某行业持仓总市值 / 分母
 
         Returns:
             {
@@ -602,7 +605,8 @@ class RiskManager:
             buy_val = _get_value(buy)
             if buy_val <= 0:
                 continue
-            total_portfolio_value += buy_val
+            # v4.7.4: 分母=总权益(现金+持仓+计划买入), equity未提供时回退旧口径
+            _denom = (float(equity) if equity and equity > 0 else total_portfolio_value) + buy_val
             code = buy.get("code", buy.get("symbol", ""))
             info = pool_map.get(code, {})
             sec = info.get("sector", "")
@@ -610,8 +614,8 @@ class RiskManager:
                 sec_val = sector_values.get(sec, 0) + buy_val
             else:
                 sec_val = 0
-            if sec and total_portfolio_value > 0:
-                concentration = sec_val / total_portfolio_value
+            if sec and _denom > 0:
+                concentration = sec_val / _denom
                 if concentration > max_sector:
                     violations.append({
                         "code": code,
@@ -744,8 +748,9 @@ class RiskManager:
                 })
 
         # 3. 行业/概念集中度
+        # v4.7.4: 传入current_equity作为分母(权益口径), 修复高现金组合假阳性
         sector_check = self.check_sector_concentration(
-            buy_trades, current_positions, stock_pool
+            buy_trades, current_positions, stock_pool, equity=current_equity
         )
         if not sector_check["ok"]:
             result["approved"] = False
