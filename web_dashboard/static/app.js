@@ -665,6 +665,13 @@ function renderModels(d, filter) {
       const rColor = rAcc >= th.retrain_planned ? 'var(--success)' : rAcc >= th.retrain_urgent ? 'var(--accent)' : 'var(--danger)';
       rCellHtml = '<span style="color:' + rColor + ';font-weight:600">' + (rAcc*100).toFixed(1) + '%</span>' +
         (rEnough ? '' : ' <span style="font-size:9px;color:var(--text3)" title="样本<20, 状态由' + (s.accuracy_source||'training') + '判定">n=' + rTot + '</span>');
+      // v4.7.4(P1+): Wilson显著性标注 — 显著优于/劣于抛硬币
+      const sv = s.sig_verdict || '';
+      if (sv === 'above_50') {
+        rCellHtml += ' <span style="font-size:11px;color:var(--success)" title="Wilson 95%CI 显著优于50%">↑</span>';
+      } else if (sv === 'below_50') {
+        rCellHtml += ' <span style="font-size:11px;color:var(--danger)" title="Wilson 95%CI 显著劣于50%">↓</span>';
+      }
     }
     // v4.7.4(P1): 乐观偏差列 — 训练估计 - 兑现精度, 暴露过拟合 (负值=兑现优于训练, 绿)
     const gap = s.optimism_gap;
@@ -696,7 +703,14 @@ function renderModels(d, filter) {
       '<td>' + sparkHtml + '</td>' +
       '</tr>';
   }).join('');
-  document.getElementById('model-freshness').textContent = '⏱ ' + new Date().toLocaleTimeString();
+  const sigOv = (cal.overall||{}).sig || {};
+  let freshnessHtml = '⏱ ' + new Date().toLocaleTimeString();
+  if (sigOv.verdict === 'below_50') {
+    freshnessHtml += ' | 全局兑现 ' + ((sigOv.accuracy||0)*100).toFixed(1) + '% z=' + sigOv.z + ' <span style="color:var(--danger)">显著劣于50%</span>';
+  } else if (sigOv.verdict === 'above_50') {
+    freshnessHtml += ' | 全局兑现显著优于50%';
+  }
+  document.getElementById('model-freshness').innerHTML = freshnessHtml;
 }
 
 // ── Pipeline v5.0 ──

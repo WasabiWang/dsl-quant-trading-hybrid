@@ -589,6 +589,14 @@ def get_calibration() -> Dict[str, Any]:
         if ra is not None:
             row["optimism_gap"] = round(row["accuracy"] - ra, 4)
 
+    # v4.7.4(P1+): 兑现精度显著性检验 — Wilson 95%CI 标注(显著优于/劣于50%)
+    _sig_map = {}
+    _sig_meta = safe_read_json(os.path.join(CONFIDENCE_DIR, "realized_significance.json")) or {}
+    for _sym, _v in (_sig_meta.get("stocks", {}) or {}).items():
+        _sig_map[str(_sym).zfill(6)] = _v.get("verdict", "")
+    for row in calibrated:
+        row["sig_verdict"] = _sig_map.get(row["symbol"], "")
+
     # v4.7.1: 主池/观察池区分 — "总标的"只统计主池; 观察池行保留打标(精度仍追踪, 30天回池判定依赖)
     master_syms = set(_stock_pool_meta_by_symbol().keys())
     obs_syms = set()
@@ -632,6 +640,8 @@ def get_calibration() -> Dict[str, Any]:
             # v4.7.4(P0-2): 剔除hold的真实兑现精度
             "realized_accuracy_ex_hold": overall.get("realized_accuracy_ex_hold"),
             "realized_total_ex_hold": overall.get("realized_total_ex_hold", 0),
+            # v4.7.4(P1+): 显著性检验全局判定
+            "sig": _sig_meta.get("overall", {}).get("master", {}),
         },
         "stocks": calibrated
     }
