@@ -621,6 +621,14 @@ def main():
         _tracker.complete(f"{_exec}笔执行, {_fail}笔失败")
     
     # ──────────── v4.6.9i(审计F1-5): 每日账目对账 ────────────
+    # v4.7.4: 修复NameError — _trader在审计F1-2块内定义(另一个函数作用域),
+    # main()直接引用致脚本尾部traceback→exit 1→cron报Exec failed(实际交易已正常执行)
+    _trader = None
+    try:
+        from paper_trader import PaperTrader
+        _trader = PaperTrader()
+    except Exception:
+        _trader = None
     if _trader is not None:
         try:
             _recon = _trader.run_portfolio_reconciliation()
