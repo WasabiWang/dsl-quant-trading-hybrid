@@ -501,6 +501,80 @@ def update_from_threshold(action: str = "status", **kwargs):
 
 
 # ═══════════════ 校准系统 → 置信度校准 ═══════════════
+def _recompute_overall_stats(pred_data: dict) -> dict:
+    """v4.7.4(P2): overall_stats实时重算 — 修复current_stock_count/stocks_above_50等
+    自2026-05-09冻结的陈旧字段。
+
+    每标的精度主判据链: 兑现精度(非hold, 样本≥5) → h20d OOS → 训练均值
+    """
+    import yaml as _yaml
+    stock_acc = pred_data.get("stock_accuracy", {}) or {}
+
+    # 主池标的数 (config/master_stock_pool.yaml)
+    current_count = 0
+    try:
+        _pool_path = PROJECT_ROOT / "config" / "master_stock_pool.yaml"
+        with open(_pool_path, "r", encoding="utf-8") as _f:
+            _pool = _yaml.safe_load(_f) or {}
+        current_count = len(_pool.get("master_pool", []) or [])
+    except Exception:
+        current_count = len(stock_acc)
+
+    # 每标的精度链 + 全局兑现统计
+    above_50 = above_60 = below_45 = 0
+    metrics = []
+    ex_hold_c = ex_hold_t = 0
+    # 全局兑现统计从 daily_records 直接计算(权威源, 覆盖含已移出股票池的历史标的)
+    for _dr in pred_data.get("daily_records", []):
+        for _s in _dr.get("stocks", []):
+            if not _s.get("realized_checked", False) or _s.get("signal", "hold") == "hold":
+                continue
+            ex_hold_t += 1
+            _rc = _s.get("realized_correct")
+            if _rc is True or _rc == 1:
+                ex_hold_c += 1
+    for _sym, sa in stock_acc.items():
+        if not isinstance(sa, dict):
+            continue
+        _rt = sa.get("realized_total", 0) or 0
+        _rc = sa.get("realized_correct", 0) or 0
+        # 主判据链
+        if _rt >= 5:
+            m = _rc / _rt
+        else:
+            _h20 = sa.get("h20d_accuracy", 0) or 0
+            m = _h20 if _h20 > 0 else (sa.get("mean_accuracy", 0) or 0)
+        if m <= 0:
+            continue
+        metrics.append(m)
+        if m >= 0.50:
+            above_50 += 1
+        if m >= 0.60:
+            above_60 += 1
+        if m < 0.45:
+            below_45 += 1
+
+    h20d_mean = 0.0
+    _h20_meta = pred_data.get("h20d_eval_meta", {}) or {}
+    if _h20_meta.get("mean_accuracy"):
+        try:
+            h20d_mean = round(float(_h20_meta["mean_accuracy"]), 4)
+        except (TypeError, ValueError):
+            pass
+
+    return {
+        "current_stock_count": current_count,
+        "stocks_above_50": above_50,
+        "stocks_above_60": above_60,
+        "stocks_below_45": below_45,
+        "realized_correct_ex_hold": ex_hold_c,
+        "realized_total_ex_hold": ex_hold_t,
+        "realized_accuracy_ex_hold": round(ex_hold_c / ex_hold_t, 4) if ex_hold_t > 0 else None,
+        "h20d_mean_accuracy": h20d_mean,
+        "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
 def update_from_calibration():
     """
     从每日预测结果 + 黑天鹅事件 校准预测精度
@@ -699,13 +773,20 @@ def update_from_calibration():
                         conflict_count += 1
             
             # 🔧 Fix 6: 从daily_records同步correct_predictions到overall_stats
+            # v4.7.4(P0-2): 只统计非hold信号, hold(realized_correct=None)剔除分母
             correct_total = 0
             for dr in pred_data.get("daily_records", []):
                 for sr in dr.get("stocks", []):
                     rc = sr.get("realized_correct")
-                    if rc is True or rc == 1:
+                    if (rc is True or rc == 1) and sr.get("signal", "hold") != "hold":
                         correct_total += 1
             stats["correct_predictions"] = correct_total
+
+            # v4.7.4(P2): overall_stats 实时全量重算 — 修复陈旧字段
+            # (current_stock_count=29/stocks_above_50=21 等自05-09冻结)
+            _ov_rt = _recompute_overall_stats(pred_data)
+            for _k, _v in _ov_rt.items():
+                stats[_k] = _v
             
             # 更新置信度校准的 prediction_quality
             conf_data["prediction_quality"] = {

@@ -516,6 +516,10 @@ def get_calibration() -> Dict[str, Any]:
         if isinstance(data, dict):
             acc = data.get("last_accuracy", 0) or 0
             h20d_acc = data.get("h20d_accuracy", 0) or 0
+            # v4.7.4(P0-2): 兑现精度(非hold) — 真实方向精度, 主判据
+            _rt = data.get("realized_total", 0) or 0
+            _rc = data.get("realized_correct", 0) or 0
+            realized_acc = round(_rc / _rt, 4) if _rt > 0 else None
             # v4.6.9d: 精度历史数组 (供前端sparkline), 取最近20条非0值
             acc_hist = [float(x) for x in data.get("accuracies", []) if isinstance(x, (int, float)) and x > 0]
             calibrated.append({
@@ -524,12 +528,17 @@ def get_calibration() -> Dict[str, Any]:
                 "accuracy": acc,
                 "h20d_accuracy": h20d_acc,
                 "mean_accuracy": data.get("mean_accuracy", 0),
-                "realized_correct": data.get("realized_correct", 0),
+                "realized_correct": _rc,
+                "realized_total": _rt,
+                "realized_accuracy": realized_acc,
+                "hold_total": data.get("hold_checked_total", 0),
                 "h20d_correct": data.get("h20d_correct", 0),
                 "h20d_total": data.get("h20d_total", 0),
                 "total_predictions": len(data.get("accuracies", [])),
                 "accuracy_history": acc_hist[-20:],
-                "calibration_status": "retrain_urgent" if acc < thresholds["retrain_urgent"] else ("retrain_planned" if acc < thresholds["retrain_planned"] else "normal"),
+                "calibration_status": "normal",  # 占位, 下方统一按主判据链重算
+                "accuracy_source": "training",
+                "optimism_gap": None,
                 "last_update": "",
                 "train_time": model_train_times.get(symbol, "")
             })
@@ -545,16 +554,40 @@ def get_calibration() -> Dict[str, Any]:
             enh_acc = p.get("direction_accuracy", p.get("accuracy", None))
             if enh_acc is not None and enh_acc > 0:
                 calib_map[sym]["accuracy"] = round(enh_acc, 4)
-                # 同步更新校准状态 (v4.6.9d: 用动态阈值)
-                calib_map[sym]["calibration_status"] = (
-                    "retrain_urgent" if enh_acc < thresholds["retrain_urgent"]
-                    else "retrain_planned" if enh_acc < thresholds["retrain_planned"]
-                    else "normal"
-                )
             h20d = p.get("h20d", {})
             h20d_acc_val = h20d.get("direction_accuracy", None)
             if h20d_acc_val is not None:
                 calib_map[sym]["h20d_accuracy"] = round(h20d_acc_val, 4)
+
+    # v4.7.4(P1): 状态主判据链 — 兑现精度(非hold, ≥20样本) → h20d OOS → 训练估计
+    # 训练精度降为参考列; 乐观偏差 = 训练精度 - 兑现精度 (暴露过拟合)
+    MIN_REALIZED_SAMPLES = 20
+
+    def _status_from_acc(a: float) -> str:
+        if a is None:
+            return "normal"
+        if a < thresholds["retrain_urgent"]:
+            return "retrain_urgent"
+        if a < thresholds["retrain_planned"]:
+            return "retrain_planned"
+        return "normal"
+
+    for row in calibrated:
+        ra = row["realized_accuracy"]
+        if ra is not None and row["realized_total"] >= MIN_REALIZED_SAMPLES:
+            row["calibration_status"] = _status_from_acc(ra)
+            row["accuracy_source"] = "realized"
+        else:
+            _h20 = row.get("h20d_accuracy", 0) or 0
+            _h20_real = _h20 > 0 and abs(_h20 - 0.5) > 0.001 and row.get("h20d_total", 0) > 0
+            if _h20_real:
+                row["calibration_status"] = _status_from_acc(_h20)
+                row["accuracy_source"] = "h20d_oos"
+            else:
+                row["calibration_status"] = _status_from_acc(row["accuracy"])
+                row["accuracy_source"] = "training"
+        if ra is not None:
+            row["optimism_gap"] = round(row["accuracy"] - ra, 4)
 
     # v4.7.1: 主池/观察池区分 — "总标的"只统计主池; 观察池行保留打标(精度仍追踪, 30天回池判定依赖)
     master_syms = set(_stock_pool_meta_by_symbol().keys())
@@ -574,10 +607,10 @@ def get_calibration() -> Dict[str, Any]:
             row["pool_status"] = "observation" if row["symbol"] in obs_syms else "orphan"
             obs_count += 1
 
-    # v4.5.23: 用覆盖后的精度重新计算统计总数 (v4.7.1起仅统计主池)
+    # v4.5.23: 用主判据链后的状态重新计算统计总数 (v4.7.1起仅统计主池)
     total = len(master_rows)
-    retrain_urgent = sum(1 for s in master_rows if s.get("accuracy", 0) < thresholds["retrain_urgent"])
-    retrain_planned = sum(1 for s in master_rows if thresholds["retrain_urgent"] <= s.get("accuracy", 0) < thresholds["retrain_planned"])
+    retrain_urgent = sum(1 for s in master_rows if s.get("calibration_status") == "retrain_urgent")
+    retrain_planned = sum(1 for s in master_rows if s.get("calibration_status") == "retrain_planned")
     normal = total - retrain_urgent - retrain_planned
 
     overall = calib.get("overall_stats", {})
@@ -596,6 +629,9 @@ def get_calibration() -> Dict[str, Any]:
             "correct_predictions": overall.get("correct_predictions", 0),
             "total_predictions": overall.get("total_predictions", 0),
             "calibration_error": overall.get("calibration_error", 0),
+            # v4.7.4(P0-2): 剔除hold的真实兑现精度
+            "realized_accuracy_ex_hold": overall.get("realized_accuracy_ex_hold"),
+            "realized_total_ex_hold": overall.get("realized_total_ex_hold", 0),
         },
         "stocks": calibrated
     }

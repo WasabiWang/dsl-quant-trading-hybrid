@@ -383,6 +383,7 @@ function renderOverview(d) {
 
   const avgAcc = stks.length > 0 ? stks.reduce(function(a,s){return a + (s.accuracy||0)}, 0) / stks.length : 0;
   const avgH20 = stks.length > 0 ? stks.reduce(function(a,s){return a + (s.h20d_accuracy||0)}, 0) / stks.length : 0;
+  const ovReal = (cal.overall||{}).realized_accuracy_ex_hold != null ? Number((cal.overall||{}).realized_accuracy_ex_hold) : null;
   const trainedCount = stks.filter(function(s) { return s.accuracy > 0 && Math.abs(s.accuracy - 0.5) > 0.001; }).length;
   document.getElementById('ov-model-health').innerHTML =
     '<div class="metric-row"><span class="metric-label">模型总数</span><span class="metric-val" style="color:var(--accent)">' + (sum.total||0) + '</span></div>' +
@@ -390,8 +391,9 @@ function renderOverview(d) {
     '<div class="metric-row"><span class="metric-label">急迫重训</span><span class="metric-val" style="color:' + (sum.retrain_urgent > 0 ? 'var(--danger)' : 'var(--success)') + '">' + (sum.retrain_urgent||0) + ' 只</span></div>' +
     '<div class="metric-row"><span class="metric-label">计划重训</span><span class="metric-val" style="color:var(--accent)">' + (sum.retrain_planned||0) + ' 只</span></div>' +
     '<div class="metric-row"><span class="metric-label">正常</span><span class="metric-val" style="color:var(--success)">' + (sum.normal||0) + ' 只</span></div>' +
-    '<div class="metric-row"><span class="metric-label">均值H5D精度</span><span class="metric-val" style="color:' + (avgAcc >= 0.5 ? 'var(--success)' : 'var(--accent)') + '">' + (avgAcc*100).toFixed(1) + '%</span></div>' +
-    '<div class="metric-row"><span class="metric-label">均值H20D精度</span><span class="metric-val">' + (avgH20*100).toFixed(1) + '%</span></div>';
+    '<div class="metric-row"><span class="metric-label">均值训练精度</span><span class="metric-val" style="color:' + (avgAcc >= 0.5 ? 'var(--success)' : 'var(--accent)') + '">' + (avgAcc*100).toFixed(1) + '%</span></div>' +
+    '<div class="metric-row"><span class="metric-label">均值H20D精度</span><span class="metric-val">' + (avgH20*100).toFixed(1) + '%</span></div>' +
+    '<div class="metric-row"><span class="metric-label">兑现精度(剔hold)★</span><span class="metric-val" style="color:' + (ovReal != null ? (ovReal >= 0.5 ? 'var(--success)' : 'var(--danger)') : 'var(--text2)') + '">' + (ovReal != null ? (ovReal*100).toFixed(1) + '%' : '—') + '</span></div>';
 
   const hasPerfData = s.total_return != null && s.total_return !== '';
   // v4.6.9: 总览绩效卡显示模拟盘真实绩效（不再显示回测数字, 避免误导）
@@ -560,6 +562,16 @@ function renderRankIC() {
         '<polyline points="' + pts.trim() + '" fill="none" stroke="' + conf[0] + '" stroke-width="1.8"/></svg>';
     }
     const reasons = (s.drift_reasons||[]).map(function(x){ return '<div style="color:var(--danger);font-size:11px;margin:2px 0">⚠️ ' + esc(x) + '</div>'; }).join('');
+    // v4.7.4(P1): degraded/critical 时全页置顶 banner — 模型页精度需按兑现口径审慎解读
+    const banner = document.getElementById('model-ic-banner');
+    if (banner) {
+      if (st === 'degraded' || st === 'critical' || st === 'drifted' || st === 'data_issue') {
+        banner.innerHTML = '<div style="background:rgba(255,71,87,.08);border:1px solid rgba(255,71,87,.45);border-radius:8px;padding:8px 12px;margin:2px 0 10px;font-size:12px;color:var(--danger)">' +
+          '🚨 截面Rank IC <b>' + st + '</b>：近20日均值 ' + (s.recent20_mean==null?'—':s.recent20_mean.toFixed(4)) + ' — 模型预测力当前失效，下方训练精度仅供参考，请以<b>兑现精度</b>为准</div>';
+      } else {
+        banner.innerHTML = '';
+      }
+    }
     body.innerHTML =
       '<div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">' +
       '<div><div class="value ' + (s.rank_ic_mean>=0?'green':'red') + '">' + (s.rank_ic_mean==null?'—':s.rank_ic_mean.toFixed(4)) + '</div><div class="label">Rank IC 均值(' + s.n_days + '日)</div></div>' +
@@ -586,10 +598,10 @@ function renderModels(d, filter) {
   const stocks = cal.stocks || [];
   const tbody = document.querySelector('#model-table tbody');
   let filtered = stocks;
-  if (filter === 'urgent') filtered = stocks.filter(function(s) { return s.accuracy < th.retrain_urgent; });
+  if (filter === 'urgent') filtered = stocks.filter(function(s) { return s.calibration_status === 'retrain_urgent'; });
   else if (filter === 'planned') filtered = stocks.filter(function(s) { return s.calibration_status === 'retrain_planned'; });
 
-  if (!filtered.length) { tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text2);padding:24px">暂无模型数据</td></tr>'; document.getElementById('model-freshness').textContent = ''; return; }
+  if (!filtered.length) { tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:var(--text2);padding:24px">暂无模型数据</td></tr>'; document.getElementById('model-freshness').textContent = ''; return; }
 
   const preds = (d.predictions||{}).predictions || [];
   const predMap = {};
@@ -600,7 +612,9 @@ function renderModels(d, filter) {
     const aPF = pfCodes.has(a.symbol) ? 0 : 1;
     const bPF = pfCodes.has(b.symbol) ? 0 : 1;
     if (aPF !== bPF) return aPF - bPF;
-    return (a.accuracy||0) - (b.accuracy||0);
+    const pa = a.realized_accuracy != null ? a.realized_accuracy : (a.h20d_accuracy || a.accuracy || 0);
+    const pb = b.realized_accuracy != null ? b.realized_accuracy : (b.h20d_accuracy || b.accuracy || 0);
+    return pa - pb;
   });
 
   // v4.6.9d: 训练时间新鲜度 — 相对时间 + 陈旧标黄 (>48h)
@@ -634,9 +648,28 @@ function renderModels(d, filter) {
     const pfRowStyleM = inPF ? 'background:rgba(245,158,11,.08);border-left:3px solid var(--accent)' : '';
     const pfBadgeM = inPF ? ' <span style="font-size:10px;background:var(--accent);color:#000;padding:1px 5px;border-radius:3px;font-weight:600" title="当前持仓">📦持仓</span>' : '';
     const obsBadge = (s.pool_status === 'observation' || s.pool_status === 'orphan') ? ' <span style="font-size:10px;background:rgba(96,165,250,.15);color:#7db8ff;padding:1px 5px;border-radius:3px;font-weight:600" title="观察池标的 — 30天精度≥50%可自动回池">🔭观察</span>' : '';
-    // v4.6.9d: P2-1 Correct列 → 显示 H5D方向正确数 (realized_correct), h20d_correct 移到tooltip
-    const h5dCorrect = s.realized_correct || 0;
-    const h20dInfo = (s.h20d_correct != null && s.h20d_total) ? (s.h20d_correct + '/' + s.h20d_total) : '';
+    // v4.6.9d: P2-1 Correct列 → 显示 H5D方向正确数 (realized_correct, 非hold), hold单独tooltip
+    const rTot = s.realized_total || 0;
+    const holdN = s.hold_total || 0;
+    const h5dCorrectHtml = (rTot > 0 || holdN > 0)
+      ? (s.realized_correct || 0) + '<span style="font-size:9px;color:var(--text3)" title="非hold兑现: 正确/总数">/' + rTot + '</span>' +
+        (holdN ? ' <span style="font-size:9px;color:var(--text3)" title="hold样本已从方向精度分母剔除">h' + holdN + '</span>' : '')
+      : '—';
+    // v4.7.4(P1): 兑现精度列 — 真实方向精度(非hold), 样本不足时灰显并标注
+    const rAcc = s.realized_accuracy;
+    const rEnough = rTot >= 20;
+    let rCellHtml;
+    if (rAcc == null) {
+      rCellHtml = '<span style="color:var(--text3);font-size:11px">无样本</span>';
+    } else {
+      const rColor = rAcc >= th.retrain_planned ? 'var(--success)' : rAcc >= th.retrain_urgent ? 'var(--accent)' : 'var(--danger)';
+      rCellHtml = '<span style="color:' + rColor + ';font-weight:600">' + (rAcc*100).toFixed(1) + '%</span>' +
+        (rEnough ? '' : ' <span style="font-size:9px;color:var(--text3)" title="样本<20, 状态由' + (s.accuracy_source||'training') + '判定">n=' + rTot + '</span>');
+    }
+    // v4.7.4(P1): 乐观偏差列 — 训练估计 - 兑现精度, 暴露过拟合 (负值=兑现优于训练, 绿)
+    const gap = s.optimism_gap;
+    const gapCellHtml = gap == null ? '<span style="color:var(--text3);font-size:11px">—</span>'
+      : '<span style="color:' + (gap > 0.10 ? 'var(--danger)' : gap > 0.05 ? 'var(--accent)' : 'var(--success)') + '">' + (gap >= 0 ? '+' : '') + (gap*100).toFixed(1) + 'pp</span>';
     // v4.6.9d: P3-2 精度走势 sparkline
     const hist = s.accuracy_history || [];
     const sparkHtml = hist.length >= 2 ? sparkline(hist, 80, 22) : '<span style="color:var(--text3);font-size:10px">—</span>';
@@ -651,11 +684,13 @@ function renderModels(d, filter) {
     return '<tr style="' + pfRowStyleM + '">' +
       '<td>' + esc(s.symbol||'') + '</td>' +
       '<td>' + esc(s.name||'') + pfBadgeM + obsBadge + '</td>' +
-      '<td style="color:' + h5dColor + '">' + h5dHtml + '</td>' +
+      '<td style="color:' + h5dColor + '" title="训练时测试集估计精度, 非兑现">' + h5dHtml + '</td>' +
       '<td>' + h20dDisplay(h20dAcc, acc) + '</td>' +
+      '<td>' + rCellHtml + '</td>' +
+      '<td>' + gapCellHtml + '</td>' +
       '<td>' + statusHtml + '</td>' +
       '<td>' + (s.total_predictions || 0) + '</td>' +
-      '<td>' + h5dCorrect + (h20dInfo ? ' <span style="font-size:9px;color:var(--text3)" title="H20D正确/总数">(' + h20dInfo + ')</span>' : '') + '</td>' +
+      '<td>' + h5dCorrectHtml + '</td>' +
       '<td style="font-size:11px;white-space:nowrap">' + trainTimeHtml(s.train_time) + '</td>' +
       '<td style="white-space:nowrap">' + (s.calibration_status === 'retrain_urgent' ? '<button onclick="triggerRetrain(\'' + esc(s.symbol).replace(/'/g,'&#39;') + '\')" style="background:rgba(255,71,87,.12);border:1px solid rgba(255,71,87,.3);color:var(--danger);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px;margin-right:4px">排队</button><button onclick="retrainNow(\'' + esc(s.symbol).replace(/'/g,'&#39;') + '\')" style="background:rgba(0,212,170,.12);border:1px solid rgba(0,212,170,.3);color:var(--success);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px">立即</button>' : '-') + '</td>' +
       '<td>' + sparkHtml + '</td>' +

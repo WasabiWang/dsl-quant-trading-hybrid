@@ -392,8 +392,10 @@ class CalibrationFeedback:
                     continue
                 if s.get("signal", "hold") == "hold":
                     daily_records[di]["stocks"][si]["realized_checked"] = True
-                    # v4.5.7: hold信号 = 不做操作且确实没做 = 正确
-                    daily_records[di]["stocks"][si]["realized_correct"] = True
+                    # v4.7.4(P0-2): hold不再默认判"正确" — hold是方向性预测,
+                    # 未验证不得计correct。历史注水: 1644条hold全计correct致兑现
+                    # 精度虚高至75%(真实非hold仅46.4%)。correct置None=剔除分母。
+                    daily_records[di]["stocks"][si]["realized_correct"] = None
                     modified = True
                     continue
                 
@@ -447,10 +449,12 @@ class CalibrationFeedback:
             self.calibration["daily_records"] = daily_records
             # v4.5.5 S5: 从daily_records重新累加realized_correct总数，而非仅增量
             # v4.5.5 S6(correct_predictions修复): 同时逐日写入daily_record级correct_predictions
+            # v4.7.4(P0-2): 只统计非hold信号的realized_correct, hold剔除分母
             total_correct = 0
             for dr in daily_records:
                 day_correct = sum(1 for s in dr.get("stocks", [])
-                                  if s.get("realized_correct", False))
+                                  if s.get("signal", "hold") != "hold"
+                                  and (s.get("realized_correct") is True or s.get("realized_correct") == 1))
                 dr["correct_predictions"] = day_correct
                 total_correct += day_correct
             ov = self.calibration.get("overall_stats", {})

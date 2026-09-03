@@ -58,6 +58,17 @@ def main():
     daily_records = cal.get("daily_records", [])
     today = datetime.now().date()
 
+    # v4.7.4(P0-2): 历史hold修复 — 旧逻辑把hold默认判correct(注水), 统一重置为None(剔除分母)
+    hold_reset = 0
+    for dr in daily_records:
+        for s in dr.get("stocks", []):
+            if s.get("signal", "hold") == "hold" and s.get("realized_checked", False):
+                if s.get("realized_correct") is not None:
+                    s["realized_correct"] = None
+                    hold_reset += 1
+    if hold_reset:
+        print(f"🧹 历史hold注水修复: {hold_reset} 条 realized_correct=True → None")
+
     # 收集需要检查的 (date, symbol) 集合
     pending = []
     for dr in daily_records:
@@ -105,7 +116,8 @@ def main():
                 continue
             if s.get("signal", "hold") == "hold":
                 s["realized_checked"] = True
-                s["realized_correct"] = True  # hold=未操作=正确(与check_realized_accuracy一致)
+                # v4.7.4(P0-2): hold不再默认判"正确", correct=None=剔除分母
+                s["realized_correct"] = None
                 day_modified = True
                 continue
             if "predicted_return" not in s:
@@ -139,7 +151,16 @@ def main():
                 correct += 1
         if day_modified:
             dr["correct_predictions"] = sum(
-                1 for x in dr.get("stocks", []) if x.get("realized_correct", False))
+                1 for x in dr.get("stocks", [])
+                if x.get("signal", "hold") != "hold"
+                and (x.get("realized_correct") is True or x.get("realized_correct") == 1))
+
+    # v4.7.4(P0-2): 全局重算每日correct_predictions — hold重置的天(无新回验)也需要刷新
+    for dr in daily_records:
+        dr["correct_predictions"] = sum(
+            1 for x in dr.get("stocks", [])
+            if x.get("signal", "hold") != "hold"
+            and (x.get("realized_correct") is True or x.get("realized_correct") == 1))
 
     # 汇总 overall_stats
     total_correct = sum(dr.get("correct_predictions", 0) for dr in daily_records)
@@ -147,11 +168,15 @@ def main():
     ov["correct_predictions"] = total_correct
     ov["realized_checked_total"] = sum(
         1 for dr in daily_records for s in dr.get("stocks", []) if s.get("realized_checked", False))
+    ov["realized_checked_ex_hold"] = sum(
+        1 for dr in daily_records for s in dr.get("stocks", [])
+        if s.get("realized_checked", False) and s.get("signal", "hold") != "hold")
     cal["overall_stats"] = ov
     cal["daily_records"] = daily_records
 
     # v4.7.2 P1-2: 聚合daily_records → stock_accuracy.realized_correct/realized_total
     # (Dashboard Correct列读的是stock_accuracy, 此前回填只写daily_records导致列全0)
+    # v4.7.4(P0-2): 只聚合非hold信号; hold单独计hold_checked_total
     if not args.dry_run:
         agg = {}
         for dr in daily_records:
@@ -159,18 +184,22 @@ def main():
                 sym = str(s.get("symbol", "")).zfill(6)
                 if not sym or not s.get("realized_checked", False):
                     continue
-                a = agg.setdefault(sym, {"c": 0, "t": 0})
-                a["t"] += 1
-                if s.get("realized_correct", False):
-                    a["c"] += 1
+                a = agg.setdefault(sym, {"c": 0, "t": 0, "h": 0})
+                if s.get("signal", "hold") == "hold":
+                    a["h"] += 1
+                else:
+                    a["t"] += 1
+                    if s.get("realized_correct") is True or s.get("realized_correct") == 1:
+                        a["c"] += 1
         stock_accuracy = cal.get("stock_accuracy", {})
         for sym, a in agg.items():
             sa = stock_accuracy.get(sym)
             if isinstance(sa, dict):
                 sa["realized_correct"] = a["c"]
                 sa["realized_total"] = a["t"]
+                sa["hold_checked_total"] = a["h"]
         cal["stock_accuracy"] = stock_accuracy
-        print(f"📊 已聚合 {len(agg)} 只标的 realized_correct → stock_accuracy (Dashboard Correct列)")
+        print(f"📊 已聚合 {len(agg)} 只标的 realized_correct(非hold) → stock_accuracy (Dashboard Correct列)")
 
     print(f"回填完成: 新增{checked}条 | 正确{correct} | 精度{correct / max(checked, 1):.1%}")
     if not args.dry_run:

@@ -1589,6 +1589,28 @@ def main():
     print(f"   高信度总计: {total_hit}")
     print(f"📁 缓存: {output_path}")
 
+    # v4.7.4(P2): 每日预测归档 — 防止daily_predict被覆盖后历史预测值永久丢失
+    # (08-19~09-02校准闭环冻结期间, 无归档导致11个交易日daily_records无法回填)
+    try:
+        _arch_dir = os.path.join(CACHE_DIR, "daily_predict_archive")
+        os.makedirs(_arch_dir, exist_ok=True)
+        _pd = (meta.get("predict_date") or datetime.now().strftime("%Y-%m-%d")).replace("-", "")
+        _arch_path = os.path.join(_arch_dir, f"daily_predict_{_pd}.json")
+        import shutil
+        shutil.copy2(output_path, _arch_path)
+        # 只保留最近90份归档
+        _archs = sorted(
+            (os.path.join(_arch_dir, f) for f in os.listdir(_arch_dir) if f.startswith("daily_predict_2")),
+            key=os.path.getmtime, reverse=True)
+        for _old in _archs[90:]:
+            try:
+                os.remove(_old)
+            except OSError:
+                pass
+        print(f"  🗄️ 归档: {_arch_path.split('/')[-1]} (保留最近90份)")
+    except Exception as _ae:
+        print(f"  ⚠️ 预测归档失败: {_ae}")
+
     # v4.5.3d: 进度追踪完成
     result_code = 0 if len(results) >= 10 else 1
     if tracker:
