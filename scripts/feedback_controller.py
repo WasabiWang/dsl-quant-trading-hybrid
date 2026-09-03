@@ -128,6 +128,11 @@ def update_from_black_swan():
         return {"status": "no_threat", "severity": 0}
 
     params = load_adaptive_params()
+    # v4.7.3.2: 防御性初始化 — calibration_notes缺失时params["risk"]不存在
+    # → KeyError 'risk' 导致 update_all 崩溃, 校准闭环(daily_records/兑现回验)自2026-08-18冻结
+    if not isinstance(params, dict):
+        params = {}
+    params.setdefault("risk", {})
 
     # === P1-1: 提取 calibration_notes ===
     calibration_notes = None
@@ -277,6 +282,13 @@ def update_from_backtest():
     # P1-1: 幂等保护 — 如果回测文件没变且距上次更新<30天，跳过
     bt_file_hash = str(files[0].stat().st_mtime)
     params = load_adaptive_params()
+    # v4.7.3.2: 防御性初始化 — adaptive_params无trading键时同样会KeyError
+    if not isinstance(params, dict):
+        params = {}
+    _tr = params.setdefault("trading", {})
+    _tr.setdefault("position_size", 0.13)
+    _tr.setdefault("max_positions", 6)
+    _tr.setdefault("buy_threshold", 0.035)
     last_bt_hash = params.get("_last_backtest_hash", "")
     last_bt_date = params.get("_last_backtest_date", "")
     today = datetime.now().strftime("%Y-%m-%d")
