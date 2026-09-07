@@ -169,3 +169,17 @@ def test_cron_config_static_entries_present():
     assert "个股分批预测(17:00)" in cron_names
     assert "A股盘前决策(09:20)" in cron_names
     assert "A股盘前交易预案(evening)" in cron_names
+
+
+def test_legacy_conservative_gate_keeps_one_new_position():
+    from scripts.rank_ic_monitor import resolve_rank_ic_new_position_cap
+
+    gate = {"policy": "legacy_conservative", "max_new_positions": 1}
+    assert resolve_rank_ic_new_position_cap(gate, available=5) == 1
+
+
+def test_morning_decision_consumes_explicit_risk_gate():
+    src = (PROJECT_ROOT / "scripts" / "morning_decision.py").read_text(encoding="utf-8")
+    # 盘前决策必须读显式 risk_gate (而非把展示状态当交易限制)
+    assert "resolve_rank_ic_new_position_cap" in src
+    assert "risk_gate" in src

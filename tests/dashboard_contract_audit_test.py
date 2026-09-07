@@ -444,3 +444,19 @@ def test_progress_tracker_extra_fields_do_not_override_reserved_status(monkeypat
     assert data["status"] == "completed"
     assert data["extra_status"] == 200
     assert data["completed_at"]
+
+
+def test_rank_ic_contract_three_layers_and_static_no_false_failure():
+    from web_dashboard.data_adapter import get_rank_ic
+
+    ic = get_rank_ic()
+    assert "current_summary" in ic
+    assert "historical_summary" in ic
+    assert "risk_gate" in ic
+
+    appjs_path = Path(__file__).resolve().parents[1] / "web_dashboard" / "static" / "app.js"
+    appjs = appjs_path.read_text(encoding="utf-8")
+    assert "模型预测力当前失效" not in appjs
+    # stale 与 insufficient_data 必须有独立状态映射
+    assert "insufficient_data" in appjs
+    assert "stale" in appjs
