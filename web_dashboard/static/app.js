@@ -543,10 +543,24 @@ function renderRankIC() {
     const body = document.getElementById('model-ic-body');
     const badge = document.getElementById('model-ic-badge');
     if (!body) return;
-    const s = ic.summary || {};
-    if (!s || !s.n_days) { body.innerHTML = '<div class="empty-state"><div class="empty-icon">📭</div>暂无IC数据 (rank_ic_monitor 尚未运行)</div>'; return; }
-    const st = s.drift_status || 'healthy';
-    const stMap = {healthy:['#0dc9a2','✅ healthy'], degraded:['#ffb020','⚠️ degraded'], critical:['#ff4747','🚨 critical'], drifted:['#ffb020','🟡 drifted'], data_issue:['#ff4747','🔴 data_issue']};
+    const cur = ic.current_summary || {};
+    const hist = ic.historical_summary || {};
+    const gate = ic.risk_gate || {};
+    if (!hist.n_days && !hist.as_of_date && !(ic.series||[]).length) {
+      body.innerHTML = '<div class="empty-state"><div class="empty-icon">📭</div>暂无IC数据 (rank_ic_monitor 尚未运行)</div>';
+      return;
+    }
+    const st = cur.evaluation_status || 'unknown';
+    // v4.7.5: 状态映射 — stale/insufficient_data 不再翻译成"当前失效"
+    const stMap = {
+      healthy: ['#0dc9a2', '✅ 当前模型有效'],
+      watch: ['#ffb020', '🟡 观察中'],
+      degraded: ['#ffb020', '⚠️ 当前模型退化'],
+      critical: ['#ff4747', '🚨 当前模型严重退化'],
+      stale: ['#ffb020', '⏳ 兑现数据陈旧'],
+      insufficient_data: ['#8aa4c8', '🧪 当前模型样本不足'],
+      data_issue: ['#ff4747', '🔴 数据异常']
+    };
     const conf = stMap[st] || ['#888', st];
     badge.innerHTML = '<span style="color:' + conf[0] + '">' + conf[1] + '</span>';
     const series = (ic.series||[]).slice(-30);
@@ -561,24 +575,41 @@ function renderRankIC() {
         '<line x1="0" y1="' + (h-(0-mn)/rng*h) + '" x2="' + w + '" y2="' + (h-(0-mn)/rng*h) + '" stroke="#444" stroke-dasharray="3,3"/>' +
         '<polyline points="' + pts.trim() + '" fill="none" stroke="' + conf[0] + '" stroke-width="1.8"/></svg>';
     }
-    const reasons = (s.drift_reasons||[]).map(function(x){ return '<div style="color:var(--danger);font-size:11px;margin:2px 0">⚠️ ' + esc(x) + '</div>'; }).join('');
-    // v4.7.4(P1): degraded/critical 时全页置顶 banner — 模型页精度需按兑现口径审慎解读
+    // v4.7.5(P0): banner 展示真实评估区间 + 风控 gate, 不再硬断言"当前失效"
     const banner = document.getElementById('model-ic-banner');
     if (banner) {
-      if (st === 'degraded' || st === 'critical' || st === 'drifted' || st === 'data_issue') {
-        banner.innerHTML = '<div style="background:rgba(255,71,87,.08);border:1px solid rgba(255,71,87,.45);border-radius:8px;padding:8px 12px;margin:2px 0 10px;font-size:12px;color:var(--danger)">' +
-          '🚨 截面Rank IC <b>' + st + '</b>：近20日均值 ' + (s.recent20_mean==null?'—':s.recent20_mean.toFixed(4)) + ' — 模型预测力当前失效，下方训练精度仅供参考，请以<b>兑现精度</b>为准</div>';
+      const parts = [];
+      if (hist.as_of_date) {
+        parts.push('历史窗口 ' + (hist.window_start||'?') + '～' + (hist.window_end||'?') +
+          ' Rank IC=' + (hist.recent_mean==null?'—':hist.recent_mean.toFixed(4)) +
+          '（' + (hist.n_mature_days||0) + '个成熟日，' + (hist.quality_status||'?') + '）');
+      }
+      if (cur.evaluation_status === 'insufficient_data') {
+        parts.push('当前 ' + (cur.model_family||'?') + ' 模型尚无足够5日兑现样本（' +
+          (cur.n_mature_days||0) + '/' + (cur.min_required_days||10) + '个成熟日）');
+      } else if (cur.evaluation_status === 'stale') {
+        parts.push('当前 ' + (cur.model_family||'?') + ' 模型兑现数据陈旧');
+      } else if (cur.actionable) {
+        parts.push('当前 ' + (cur.model_family||'?') + ' 模型 ' + (conf[1]||st));
+      }
+      if (gate.max_new_positions != null) {
+        parts.push('风控仍按历史 ' + (gate.effective_status||'?') + '：新开仓上限 ' + gate.max_new_positions + ' 只');
+      }
+      if (parts.length) {
+        banner.innerHTML = '<div style="background:rgba(255,167,38,.08);border:1px solid rgba(255,167,38,.45);border-radius:8px;padding:8px 12px;margin:2px 0 10px;font-size:12px">' +
+          parts.map(function(p){ return '<div>• ' + esc(p) + '</div>'; }).join('') + '</div>';
       } else {
         banner.innerHTML = '';
       }
     }
+    const hac = cur.hac;
     body.innerHTML =
       '<div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">' +
-      '<div><div class="value ' + (s.rank_ic_mean>=0?'green':'red') + '">' + (s.rank_ic_mean==null?'—':s.rank_ic_mean.toFixed(4)) + '</div><div class="label">Rank IC 均值(' + s.n_days + '日)</div></div>' +
-      '<div><div class="value ' + (s.recent20_mean==null||s.recent20_mean>=0?'green':'red') + '">' + (s.recent20_mean==null?'—':s.recent20_mean.toFixed(4)) + '</div><div class="label">近20日均值</div></div>' +
-      '<div><div class="value">' + (s.rank_icir_30d==null?'—':s.rank_icir_30d.toFixed(3)) + '</div><div class="label">ICIR(30日)</div></div>' +
-      '<div><div class="value">' + (s.updated_at||'').slice(0,16) + '</div><div class="label">更新时间</div></div>' +
-      '</div>' + spark + reasons;
+      '<div><div class="value">' + (cur.model_family||'—') + '</div><div class="label">当前模型族</div></div>' +
+      '<div><div class="value ' + (hist.recent_mean==null||hist.recent_mean>=0?'green':'red') + '">' + (hist.recent_mean==null?'—':hist.recent_mean.toFixed(4)) + '</div><div class="label">历史近20日均值</div></div>' +
+      '<div><div class="value">' + (cur.n_mature_days||0) + '/' + (cur.min_required_days||10) + '</div><div class="label">成熟样本(日)</div></div>' +
+      '<div><div class="value">' + (cur.as_of_date||'—') + '</div><div class="label">数据截至</div></div>' +
+      '</div>' + spark;
   }).catch(function(e){ console.error('rank-ic fetch failed', e); });
 }
 

@@ -334,17 +334,23 @@ def get_system_status() -> Dict[str, Any]:
         "profit_factor": bt_perf.get("profit_factor", 0),
         "sharpe_ratio": bt_perf.get("sharpe_ratio", 0),
         "max_drawdown": abs(bt_perf.get("max_drawdown_pct", 0)),
-        # v4.7.3: 截面Rank IC状态
-        "rank_ic": (get_rank_ic().get("summary") or {}),
+        # v4.7.5: 模型质量与交易限制分离 — current_summary 表质量, rank_ic_gate 表限制
+        "rank_ic": (get_rank_ic().get("current_summary") or {}),
+        "rank_ic_gate": (get_rank_ic().get("risk_gate") or {}),
     }
 
 
 def get_rank_ic() -> Dict[str, Any]:
-    """v4.7.3 P0: 截面Rank IC监控数据 (confidence_data/rank_ic_series.json)"""
+    """v4.7.5 P0: 截面Rank IC 三层契约 (confidence_data/rank_ic_series.json)。
+    current_summary 表当前模型族可评价质量, historical_summary 表历史连续性,
+    risk_gate 表交易约束及依据。"""
     data = safe_read_json(os.path.join(CONFIDENCE_DIR, "rank_ic_series.json")) or {}
     return {
-        "summary": data.get("summary", {}),
-        "thresholds": data.get("thresholds", {}),
+        "schema_version": data.get("schema_version", 1),
+        "current_summary": data.get("current_summary", {}),
+        "historical_summary": data.get("historical_summary", data.get("summary", {})),
+        "risk_gate": data.get("risk_gate", {}),
+        "data_gaps": data.get("data_gaps", []),
         "series": data.get("series", [])[-120:],  # 最近120个交易日
         "updated_at": data.get("updated_at", ""),
     }
