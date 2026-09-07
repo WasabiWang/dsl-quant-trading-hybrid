@@ -401,6 +401,62 @@ def resolve_rank_ic_new_position_cap(gate, available):
     return min(available, max(0, int(cap)))
 
 
+# ── v4.7.5: HAC 显著性影子指标 (Release B, 不驱动 risk_gate) ────────────────
+
+def hac_mean_test(values, max_lag: int = 4):
+    """Newey-West/HAC 单侧检验 (H1: mean<0), 无新增依赖。n<10 返回 None。
+    p_value_negative 对应单侧检验 H1: mean<0; 负向 z 越小 p 值越小。"""
+    from statistics import NormalDist
+    if not values:
+        return None
+    x = np.asarray(values, dtype=float)
+    n = len(x)
+    if n < 10:
+        return None
+    centered = x - x.mean()
+    long_run_var = float(np.dot(centered, centered) / n)
+    for lag in range(1, min(max_lag, n - 1) + 1):
+        weight = 1.0 - lag / (max_lag + 1.0)
+        gamma = float(np.dot(centered[lag:], centered[:-lag]) / n)
+        long_run_var += 2.0 * weight * gamma
+    se = math.sqrt(max(long_run_var, 0.0) / n)
+    if se == 0:
+        return None
+    z = float(x.mean() / se)
+    p_value_negative = NormalDist().cdf(z)
+    return {
+        "mean": round(float(x.mean()), 6),
+        "se": round(se, 6),
+        "z": round(z, 4),
+        "p_value_negative": round(p_value_negative, 6),
+        "ci95_low": round(float(x.mean() - 1.96 * se), 6),
+        "ci95_high": round(float(x.mean() + 1.96 * se), 6),
+        "max_lag": min(max_lag, n - 1),
+        "n": n,
+    }
+
+
+def shadow_quality_status(hac, thresholds=None):
+    """HAC 显著性影子判定 (仅影子, 不进入 risk_gate):
+      watch      = mean<0 但 p_value_negative >= 0.05
+      degraded   = mean<0 且 p_value_negative < 0.05
+      critical   = mean<critical_mean 且 p_value_negative < 0.05
+      healthy    = mean>=0 (未显著为负)
+      insufficient_data = HAC 不可算 (n<10)。"""
+    th = dict(thresholds or {})
+    critical_mean = float(th.get("critical_mean", -0.10))
+    if not hac:
+        return "insufficient_data"
+    mean = hac["mean"]
+    if mean >= 0:
+        return "healthy"
+    if mean < critical_mean and hac["p_value_negative"] < 0.05:
+        return "critical"
+    if hac["p_value_negative"] < 0.05:
+        return "degraded"
+    return "watch"
+
+
 def assess_evaluation_readiness(rows, daily_records, family, mature_cutoff_date,
                                 trading_days, thresholds, current_version,
                                 as_of_date=None) -> dict:
@@ -437,6 +493,9 @@ def assess_evaluation_readiness(rows, daily_records, family, mature_cutoff_date,
                     if normalize_model_family(dr.get("version", "")) == family and dr.get("date")]
     latest_prediction_date = max(family_dates) if family_dates else None
 
+    rics = [r["rank_ic"] for r in rows if r.get("rank_ic") is not None]
+    hac = hac_mean_test(rics) if len(rics) >= 10 else None
+
     return {
         "model_version": current_version,
         "model_family": family,
@@ -451,8 +510,8 @@ def assess_evaluation_readiness(rows, daily_records, family, mature_cutoff_date,
         "n_mature_days": n_mature_days,
         "min_required_days": min_status_days,
         "recent_mean": recent_mean,
-        "hac": None,
-        "shadow_quality_status": None,
+        "hac": hac,
+        "shadow_quality_status": shadow_quality_status(hac, thresholds),
     }
 
 
