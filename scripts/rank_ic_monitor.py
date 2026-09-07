@@ -18,7 +18,7 @@
   .venv/bin/python3 scripts/rank_ic_monitor.py --backfill # 全量回填K线+realized (首次)
   .venv/bin/python3 scripts/rank_ic_monitor.py --dry-run
 """
-import os, sys, json, argparse, math, time
+import os, sys, json, argparse, math, time, re
 from datetime import datetime, timedelta
 from collections import Counter
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -221,10 +221,12 @@ import pandas as pd
 
 
 def compute_ic_series(cal: dict, thresholds: dict) -> list:
-    """按日期截面计算 (5d horizon) IC 序列。"""
+    """按日期截面计算 (5d horizon) IC 序列。每行带 model_version/model_family。"""
     rows = []
     for dr in cal.get("daily_records", []):
         date = dr["date"]
+        model_version = dr.get("version", "unknown")
+        model_family = normalize_model_family(model_version)
         preds, reals = [], []
         total = 0
         for s in dr.get("stocks", []):
@@ -246,6 +248,8 @@ def compute_ic_series(cal: dict, thresholds: dict) -> list:
             continue
         rows.append({
             "date": date,
+            "model_version": model_version,
+            "model_family": model_family,
             "n": len(preds),
             "total_5d": total,
             "coverage": round(len(preds) / total, 4),
@@ -254,6 +258,31 @@ def compute_ic_series(cal: dict, thresholds: dict) -> list:
         })
     rows.sort(key=lambda r: r["date"])
     return rows
+
+
+# ── v4.7.5: 模型族与交易日成熟度纯函数 ───────────────────────────────────
+
+def normalize_model_family(version: str) -> str:
+    """稳定模型族归一化: v4.7.3.1 与 v4.7.4 均归入 v4.7; 不按 training_hash 分群。"""
+    match = re.match(r"^v?(\d+)\.(\d+)", str(version or ""))
+    return f"v{match.group(1)}.{match.group(2)}" if match else "unknown"
+
+
+def mature_cutoff(trading_days, horizon: int = 5, as_of_date=None):
+    """可兑现截止日: horizon 日兑现窗口下, 该日及之前的截面收益均已到期。
+    禁止依赖真实当前时间(测试可传 as_of_date)。"""
+    if as_of_date is None:
+        as_of_date = datetime.now().strftime("%Y-%m-%d")
+    ordered = sorted(d for d in trading_days if d <= as_of_date)
+    return ordered[-(horizon + 1)] if len(ordered) > horizon else None
+
+
+def trading_session_lag(as_of_date, cutoff_date, trading_days):
+    """用交易日(非自然日)计算滞后: 落在 (as_of_date, cutoff_date] 的交易日数。"""
+    if not as_of_date or not cutoff_date:
+        return None
+    eligible = [d for d in sorted(trading_days) if as_of_date < d <= cutoff_date]
+    return len(eligible)
 
 
 def compute_drift(series: list, thresholds: dict) -> dict:
