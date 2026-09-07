@@ -24,6 +24,7 @@ import subprocess
 import numpy as np
 from agents.analysts.macro_analyst import MacroAnalyst
 from common.feishu_utils import send_markdown
+from scripts.rank_ic_monitor import resolve_rank_ic_new_position_cap
 
 # ⏸️ 假日检查：evening mode检查下一个交易日，morning mode检查今天
 try:
@@ -231,16 +232,37 @@ LAST_DAILY_PREDICT_FRESHNESS = {
 
 
 def load_rank_ic_status() -> dict:
-    """v4.7.3 P0: 读取截面Rank IC监控状态 (rank_ic_monitor.py 产出)。
-    返回 summary dict; 文件缺失/异常时返回 healthy 兜底(不阻塞主流程)。
+    """v4.7.5 P0: 读取截面Rank IC三层契约 (rank_ic_monitor.py 产出)。
+    返回完整契约 {current_summary, historical_summary, risk_gate}。
+    文件缺失/异常时返回 fail_safe (新开仓≤1), 不放开到 healthy。
     """
     _path = os.path.join(PROJECT_ROOT, "confidence_data", "rank_ic_series.json")
     try:
         with open(_path, encoding="utf-8") as _f:
             _d = json.load(_f)
-        return (_d.get("summary") or {}) if isinstance(_d, dict) else {}
+        if not isinstance(_d, dict):
+            raise ValueError("not dict")
+        if "risk_gate" in _d:
+            return {
+                "current_summary": _d.get("current_summary", {}),
+                "historical_summary": _d.get("historical_summary", _d.get("summary", {})),
+                "risk_gate": _d.get("risk_gate", {}),
+            }
+        # 旧 schema 兼容: 只有 summary.drift_status → 保守映射, 不放开到 healthy
+        _s = _d.get("summary", {}) or {}
+        _status = _s.get("drift_status", "healthy")
+        _cap = 0 if _status == "critical" else (1 if _status == "degraded" else None)
+        return {
+            "current_summary": {"evaluation_status": "unknown", "actionable": False},
+            "historical_summary": _s,
+            "risk_gate": {"policy": "legacy_conservative", "effective_status": _status,
+                          "max_new_positions": _cap, "basis": "historical_summary"},
+        }
     except Exception:
-        return {}
+        return {
+            "current_summary": {"evaluation_status": "data_issue", "actionable": False},
+            "risk_gate": {"policy": "fail_safe", "max_new_positions": 1},
+        }
 
 
 def load_daily_predictions():
@@ -1611,19 +1633,19 @@ def plan_trades(alpha_scores, daily_predictions, final_position, trader=None,
     sell_count = len(sell_candidates)
     max_new_buys = MAX_POSITIONS - (current_count - sell_count)
 
-    # v4.7.3 P0: 截面Rank IC质量gate (35只池, 滚动20日均值, 滞后5日兑现)
-    #   degraded: 近20日均值<0 → 新开仓限1只 (警戒, 不阻止加仓)
-    #   critical: 近20日均值<critical_mean → 暂停新开仓 (仅允许减仓/平仓)
+    # v4.7.5 P0: 截面Rank IC质量gate — 读显式 risk_gate (而非展示状态)
+    #   gate.max_new_positions: critical=0 / degraded=1 / 其他不设上限(None)
+    #   当前 v4.7 样本不足时继承历史 degraded → 新开仓仍≤1, 不放宽
     _ic = load_rank_ic_status()
-    _ic_status = _ic.get("drift_status", "healthy")
-    _ic_recent = _ic.get("recent20_mean")
-    _ic_critical = float((_ic.get("thresholds") or {}).get("critical_mean", -0.10))
-    if _ic_status == "critical" and isinstance(_ic_recent, (int, float)):
-        print(f"  🚨 截面IC critical: recent20={_ic_recent:.4f}<{_ic_critical} → 暂停新开仓(仅减仓)")
-        max_new_buys = 0
-    elif _ic_status == "degraded" and isinstance(_ic_recent, (int, float)):
-        print(f"  ⚠️ 截面IC degraded: recent20={_ic_recent:.4f} → 新开仓上限1只")
-        max_new_buys = min(max_new_buys, 1)
+    _ic_gate = _ic.get("risk_gate", {})
+    _ic_ev = (_ic.get("current_summary") or {}).get("evaluation_status", "unknown")
+    max_new_buys = resolve_rank_ic_new_position_cap(_ic_gate, max_new_buys)
+    _ic_cap = _ic_gate.get("max_new_positions")
+    if _ic_cap == 0:
+        print(f"  🚨 风控gate critical: 暂停新开仓(仅减仓)")
+    elif _ic_cap == 1:
+        print(f"  ⚠️ 风控gate legacy_conservative(继承历史degraded): 新开仓上限1只")
+    print(f"  🧪 当前Rank IC: {_ic_ev}")
     
     if buy_candidates:
         # v4.5.9b: 按Tier升序+评分降序排列，确保双确认优先
@@ -2142,28 +2164,19 @@ def _system_status_notes() -> str:
     # 4. 数据源降级 (已知常态: 东财push2封锁→新浪/同花顺)
     lines.append("- ℹ️ 数据源: 东财push2封锁(已知)→新浪/同花顺降级链, 降级属设计内行为")
 
-    # 5. v4.7.3: 截面Rank IC状态
+    # 5. v4.7.5: 截面Rank IC状态 (三层契约)
     try:
         _ic = load_rank_ic_status()
-        _ic_st = _ic.get("drift_status", "healthy")
-        _ic_rm = _ic.get("recent20_mean")
-        _ic_icir = _ic.get("rank_icir_30d")
-        if _ic_st == "healthy":
-            _ic_icon = "✅"
-        elif _ic_st == "degraded":
-            _ic_icon = "⚠️"
-        elif _ic_st == "drifted":
-            _ic_icon = "🟡"
-        elif _ic_st == "critical":
-            _ic_icon = "🚨"
-        else:
-            _ic_icon = "🔴"
-        _ic_line = f"- {_ic_icon} 截面Rank IC: {_ic_st}"
-        if _ic_rm is not None:
-            _ic_line += f", 近20日均值={_ic_rm:.4f}"
-        if _ic_icir is not None:
-            _ic_line += f", ICIR30={_ic_icir}"
-        lines.append(_ic_line)
+        _cur = _ic.get("current_summary", {})
+        _hist = _ic.get("historical_summary", {})
+        _gate = _ic.get("risk_gate", {})
+        _ev = _cur.get("evaluation_status", "unknown")
+        _family = _cur.get("model_family", "?")
+        _nm = _cur.get("n_mature_days", 0)
+        _min = _cur.get("min_required_days", 10)
+        lines.append(f"- 🧪 当前Rank IC: {_ev}（{_family}，{_nm}/{_min}个成熟日）")
+        _cap = _gate.get("max_new_positions")
+        lines.append(f"- ⚠️ 风控gate: {_gate.get('policy', '?')}（继承历史{_hist.get('quality_status', '?')}，新开仓≤{_cap if _cap is not None else '不限'}）")
     except Exception:
         pass
 
