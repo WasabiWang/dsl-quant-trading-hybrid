@@ -675,7 +675,9 @@ def update_from_calibration():
                        "direction_accuracy": float(acc),
                        "confidence": float(conf), "signal": signal,
                        "predicted_return": round(float(predicted_return), 4),
-                       "horizon": horizon}
+                       "horizon": horizon,
+                       "training_hash": s.get("training_hash", ""),
+                       "source": s.get("source", "")}
                 
                 # v4.5.3c: 预留兑现精度字段
                 rec["realized_return"] = None
