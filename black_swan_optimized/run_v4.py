@@ -234,12 +234,13 @@ def update_dsl_config(suggested_ratio: float, lppl_results: dict) -> bool:
     )
 
     # 更新黑天鹅状态摘要
+    # v4.7.x BUGFIX(09-07): summary含': '直接注入YAML会ScannerError(同lppl_to_dsl), 统一双引号包裹
     bubble_symbols = [s for s, d in lppl_results.items() if d.get('bubble_strength', 0) > 0.8]
     summary = f'LPPL泡沫检测: {len(bubble_symbols)}个标的检测到泡沫成熟信号: {", ".join(bubble_symbols)}。综合风险等级: CRITICAL'
-
+    _quoted = '"' + summary.replace('\\', '\\\\').replace('"', '\\"') + '"'
     content = re.sub(
         r'black_swan_overall:.*',
-        f'black_swan_overall: {summary}',
+        f'black_swan_overall: {_quoted}',
         content
     )
 
@@ -250,6 +251,15 @@ def update_dsl_config(suggested_ratio: float, lppl_results: dict) -> bool:
 
     with open(DSL_CONFIG_PATH, 'w') as f:
         f.write(content)
+    # 写后校验, 失败回滚, 绝不留损坏配置给下游(09:30执行层等)
+    try:
+        import yaml as _yaml
+        with open(DSL_CONFIG_PATH) as _f:
+            _yaml.safe_load(_f)
+    except Exception as _e:
+        shutil.copy(backup_path, DSL_CONFIG_PATH)
+        print(f'  ❌ 写入后YAML校验失败, 已回滚: {_e}')
+        return False
 
     print(f'  ✅ 已更新 {DSL_CONFIG_PATH}')
     print(f'  📋 position_ratio: → {suggested_ratio:.2f}')

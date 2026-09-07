@@ -96,11 +96,29 @@ def update_adaptive_params_yaml(lppl_result):
         content = re.sub(r'lppl_position_ratio: [\d.]+', f'lppl_position_ratio: {lp["lppl_position_ratio"]:.2f}', content)
     else:
         content = content.replace('black_swan_active:', f'lppl_position_ratio: {lp["lppl_position_ratio"]:.2f}\n  black_swan_active:')
-    summary = f'LPPL泡沫检测: {lp["cn_target_details"]}'
-    content = re.sub(r'black_swan_overall:.*', f'black_swan_overall: {summary}', content)
+    # v4.7.x BUGFIX(09-07): 此前把Python dict repr直接注入YAML — 值内': '使ScannerError,
+    # 08:10 LPPL cron写坏adaptive_params.yaml → 09:30交易执行启动即崩(连续多日)。
+    # 修复: JSON序列化+双引号包裹(转义内部引号), 写入后强制yaml校验, 失败自动回滚.bak.lppl。
+    _detail = lp["cn_target_details"]
+    if isinstance(_detail, dict):
+        _detail_str = json.dumps(_detail, ensure_ascii=False)
+    else:
+        _detail_str = str(_detail)
+    summary = f'LPPL泡沫检测: {_detail_str}'
+    def _yaml_quote(s: str) -> str:
+        return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
+    content = re.sub(r'black_swan_overall:.*', f'black_swan_overall: {_yaml_quote(summary)}', content)
     import shutil
     shutil.copy(CONFIG_ADAPTIVE, str(CONFIG_ADAPTIVE)+'.bak.lppl')
     with open(CONFIG_ADAPTIVE, 'w') as f: f.write(content)
+    try:
+        import yaml as _yaml
+        with open(CONFIG_ADAPTIVE) as _f:
+            _yaml.safe_load(_f)
+    except Exception as _e:
+        shutil.copy(str(CONFIG_ADAPTIVE)+'.bak.lppl', CONFIG_ADAPTIVE)
+        print(f"  ❌ adaptive_params写入后YAML校验失败, 已自动回滚: {_e}")
+        return False
     print(f"  adaptive_params updated: position_ratio={lp['lppl_position_ratio']:.2f}")
     return True
 
