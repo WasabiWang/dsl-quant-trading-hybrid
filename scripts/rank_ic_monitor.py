@@ -42,6 +42,8 @@ DEFAULT_THRESHOLDS = {
     "drift_decay": DRIFT_DECAY,
     "coverage_min": COVERAGE_MIN,
     "min_n": MIN_N,
+    "min_status_days": 10,     # v4.7.5: 当前模型族最少成熟日 (影子阈值, 非交易阈值)
+    "max_lag_sessions": 2,     # v4.7.5: 最后成熟观测落后成熟截止日最多交易日
 }
 
 
@@ -285,8 +287,9 @@ def trading_session_lag(as_of_date, cutoff_date, trading_days):
     return len(eligible)
 
 
-def compute_drift(series: list, thresholds: dict) -> dict:
-    """移植 QuantMind get_model_quality 漂移判定。"""
+def compute_quality_summary(series: list, thresholds: dict) -> dict:
+    """移植 QuantMind get_model_quality 质量判定 (仅质量层, 不含新鲜度/成熟度)。
+    显式接收已筛选的 series, 不再隐式用全历史代表当前模型。"""
     rics = [r["rank_ic"] for r in series if r.get("rank_ic") is not None]
     covs = [r["coverage"] for r in series if r.get("coverage") is not None]
     status, reasons = "healthy", []
@@ -316,13 +319,214 @@ def compute_drift(series: list, thresholds: dict) -> dict:
         std_s = (sum((x - mean_s) ** 2 for x in s) / len(s)) ** 0.5
         icir30 = round(mean_s / std_s, 4) if std_s > 0 else None
     return {
-        "drift_status": status,
-        "drift_reasons": reasons,
-        "recent20_mean": round(recent_mean, 4) if recent_mean is not None else None,
+        "quality_status": status,
+        "quality_reasons": reasons,
+        "recent_mean": round(recent_mean, 4) if recent_mean is not None else None,
         "rank_ic_mean": round(sum(rics) / len(rics), 4) if rics else None,
         "rank_icir_30d": icir30,
         "n_days": len(rics),
     }
+
+
+def compute_drift(series: list, thresholds: dict) -> dict:
+    """向后兼容薄包装: 旧消费者仍读 drift_status/drift_reasons/recent20_mean。"""
+    q = compute_quality_summary(series, thresholds)
+    return {
+        "drift_status": q["quality_status"],
+        "drift_reasons": q["quality_reasons"],
+        "recent20_mean": q["recent_mean"],
+        "rank_ic_mean": q["rank_ic_mean"],
+        "rank_icir_30d": q["rank_icir_30d"],
+        "n_days": q["n_days"],
+    }
+
+
+# ── v4.7.5: 状态判定 (固定优先级) ──────────────────────────────────────────
+
+def classify_current_status(recent_mean, n_days, lag_trading_days, coverage,
+                            thresholds=None) -> dict:
+    """当前模型族评估状态判定, 优先级固定 (不依赖文件/时间):
+      1. coverage 异常            -> data_issue
+      2. 无成熟行                 -> insufficient_data
+      3. 落后成熟截止日过多        -> stale
+      4. 成熟行不足最低样本        -> insufficient_data
+      5. 其余才进入质量判定        -> critical / degraded / healthy
+    stale 与 insufficient_data 均不得翻译成"当前模型失效"。"""
+    th = dict(thresholds or {})
+    coverage_min = float(th.get("coverage_min", COVERAGE_MIN))
+    min_status_days = int(th.get("min_status_days", 10))
+    max_lag_sessions = int(th.get("max_lag_sessions", 2))
+    critical_mean = float(th.get("critical_mean", -0.10))
+    degraded_mean = float(th.get("degraded_mean", 0.0))
+
+    if coverage is not None and coverage < coverage_min:
+        return {"evaluation_status": "data_issue", "actionable": False}
+    if not n_days:
+        return {"evaluation_status": "insufficient_data", "actionable": False}
+    if lag_trading_days is not None and lag_trading_days > max_lag_sessions:
+        return {"evaluation_status": "stale", "actionable": False}
+    if n_days < min_status_days:
+        return {"evaluation_status": "insufficient_data", "actionable": False}
+    if recent_mean is not None and recent_mean < critical_mean:
+        return {"evaluation_status": "critical", "actionable": True}
+    if recent_mean is not None and recent_mean < degraded_mean:
+        return {"evaluation_status": "degraded", "actionable": True}
+    return {"evaluation_status": "healthy", "actionable": True}
+
+
+def build_legacy_conservative_gate(historical: dict, current: dict) -> dict:
+    """风控 gate 保持不变: 继承历史 degraded 约束, 新开仓上限仍为1。
+    critical=0, degraded=1, 其他不设上限(None)。当前族样本不足时 basis=historical_summary。"""
+    hist_status = historical.get("quality_status", "healthy")
+    if hist_status == "critical":
+        return {"policy": "legacy_conservative", "effective_status": "critical",
+                "max_new_positions": 0, "basis": "historical_summary",
+                "reason": "历史截面IC critical，暂停新开仓"}
+    if hist_status == "degraded":
+        reason = ("当前模型族样本不足，暂继承最后一个有效历史告警"
+                  if current.get("evaluation_status") == "insufficient_data"
+                  else "历史截面IC degraded，新开仓上限1只")
+        return {"policy": "legacy_conservative", "effective_status": "degraded",
+                "max_new_positions": 1, "basis": "historical_summary", "reason": reason}
+    return {"policy": "legacy_conservative", "effective_status": hist_status,
+            "max_new_positions": None, "basis": "historical_summary",
+            "reason": "历史截面IC未触发 degraded/critical，不额外限新开仓"}
+
+
+def resolve_rank_ic_new_position_cap(gate, available):
+    """从 risk_gate 解析新开仓上限; max_new_positions=None 表示不设额外上限。"""
+    cap = gate.get("max_new_positions") if isinstance(gate, dict) else None
+    if cap is None:
+        return available
+    return min(available, max(0, int(cap)))
+
+
+def assess_evaluation_readiness(rows, daily_records, family, mature_cutoff_date,
+                                trading_days, thresholds, current_version,
+                                as_of_date=None) -> dict:
+    """为当前模型族计算就绪度 + evaluation_status。新鲜度/成熟度先于质量判定。"""
+    if as_of_date is None:
+        as_of_date = datetime.now().strftime("%Y-%m-%d")
+    min_status_days = int(thresholds.get("min_status_days", 10))
+    max_lag_sessions = int(thresholds.get("max_lag_sessions", 2))
+
+    n_mature_days = len(rows)
+    last_obs_date = max(r["date"] for r in rows) if rows else None
+    coverage = min(r.get("coverage", 1.0) for r in rows[-10:]) if rows else None
+    lag_trading_days = trading_session_lag(last_obs_date, mature_cutoff_date, trading_days)
+
+    quality = compute_quality_summary(rows, thresholds)
+    recent_mean = quality["recent_mean"]
+    classified = classify_current_status(
+        recent_mean=recent_mean, n_days=n_mature_days,
+        lag_trading_days=lag_trading_days, coverage=coverage, thresholds=thresholds,
+    )
+    evaluation_status = classified["evaluation_status"]
+    actionable = classified["actionable"]
+
+    if not rows:
+        freshness_status = "unknown"
+    elif lag_trading_days is not None and lag_trading_days > max_lag_sessions:
+        freshness_status = "stale"
+    else:
+        freshness_status = "fresh"
+
+    quality_status = quality["quality_status"] if (rows and actionable) else "unknown"
+
+    family_dates = [dr["date"] for dr in daily_records
+                    if normalize_model_family(dr.get("version", "")) == family and dr.get("date")]
+    latest_prediction_date = max(family_dates) if family_dates else None
+
+    return {
+        "model_version": current_version,
+        "model_family": family,
+        "evaluation_status": evaluation_status,
+        "quality_status": quality_status,
+        "freshness_status": freshness_status,
+        "actionable": actionable,
+        "as_of_date": last_obs_date,
+        "latest_prediction_date": latest_prediction_date,
+        "mature_cutoff_date": mature_cutoff_date,
+        "lag_trading_days": lag_trading_days,
+        "n_mature_days": n_mature_days,
+        "min_required_days": min_status_days,
+        "recent_mean": recent_mean,
+        "hac": None,
+        "shadow_quality_status": None,
+    }
+
+
+def build_status_payload(series, daily_records, current_version, mature_cutoff_date,
+                         trading_days, thresholds, as_of_date=None) -> dict:
+    """三层契约: historical_summary / current_summary / risk_gate。"""
+    if as_of_date is None:
+        as_of_date = datetime.now().strftime("%Y-%m-%d")
+    family = normalize_model_family(current_version)
+    current_rows = [r for r in series if r.get("model_family") == family]
+
+    hist_quality = compute_quality_summary(series, thresholds)
+    hist_last = series[-1]["date"] if series else None
+    hist_window = series[-RECENT_WINDOW:] if series else []
+    historical = {
+        "quality_status": hist_quality["quality_status"],
+        "freshness_status": "stale" if (hist_last and mature_cutoff_date and hist_last < mature_cutoff_date) else "fresh",
+        "as_of_date": hist_last,
+        "window_start": hist_window[0]["date"] if hist_window else None,
+        "window_end": hist_window[-1]["date"] if hist_window else None,
+        "recent_mean": hist_quality["recent_mean"],
+        "rank_ic_mean": hist_quality["rank_ic_mean"],
+        "rank_icir_30d": hist_quality["rank_icir_30d"],
+        "n_mature_days": len(hist_window),
+        "quality_reasons": hist_quality["quality_reasons"],
+    }
+
+    current = assess_evaluation_readiness(
+        rows=current_rows, daily_records=daily_records, family=family,
+        mature_cutoff_date=mature_cutoff_date, trading_days=trading_days,
+        thresholds=thresholds, current_version=current_version, as_of_date=as_of_date,
+    )
+
+    risk_gate = build_legacy_conservative_gate(historical, current)
+
+    return {
+        "historical_summary": historical,
+        "current_summary": current,
+        "risk_gate": risk_gate,
+    }
+
+
+def compute_data_gaps(daily_records, trading_days, min_missing_sessions=3):
+    """从 daily_records 预测日期序列找不可恢复缺口(预测归档缺失), 不生成伪造 IC。"""
+    dates = sorted({dr["date"] for dr in daily_records if dr.get("date")})
+    td = sorted(trading_days)
+    gaps = []
+    for a, b in zip(dates, dates[1:]):
+        missing = [d for d in td if a < d < b]
+        if len(missing) >= min_missing_sessions:
+            gaps.append({
+                "start": missing[0],
+                "end": missing[-1],
+                "reason": "prediction archive unavailable",
+                "recoverable": False,
+            })
+    return gaps
+
+
+def _resolve_current_version(daily_records):
+    """当前模型版本 = 最近一条 daily_record 的 version; 缺失时读 VERSION 文件。"""
+    if daily_records:
+        latest = max(daily_records, key=lambda r: r.get("date", ""))
+        v = latest.get("version")
+        if v:
+            return str(v)
+    try:
+        with open(os.path.join(PROJECT_ROOT, "VERSION"), encoding="utf-8") as f:
+            first = f.readline().strip()
+            if first:
+                return first
+    except Exception:
+        pass
+    return "unknown"
 
 
 def main():
@@ -371,15 +575,40 @@ def main():
         print(f"  n/day: mean={np.mean(n_per_day):.1f} | min={min(n_per_day)} | max={max(n_per_day)}")
 
     summary = compute_drift(series, thresholds)
+    summary["deprecated"] = True
+    summary["replacement"] = "current_summary"
     summary["updated_at"] = datetime.now().isoformat()
     summary["thresholds"] = thresholds
-    print(f"漂移判定: {summary['drift_status']} | ICIR30={summary['rank_icir_30d']} | recent20={summary['recent20_mean']}")
+    print(f"历史漂移判定: {summary['drift_status']} | ICIR30={summary['rank_icir_30d']} | recent20={summary['recent20_mean']}")
     for reason in summary["drift_reasons"]:
         print(f"  ⚠️ {reason}")
 
+    # v4.7.5: 三层状态契约
+    daily_records = cal.get("daily_records", [])
+    current_version = _resolve_current_version(daily_records)
+    mature_cutoff_date = mature_cutoff(trading_days, horizon=5)
+    payload = build_status_payload(
+        series=series, daily_records=daily_records, current_version=current_version,
+        mature_cutoff_date=mature_cutoff_date, trading_days=trading_days,
+        thresholds=thresholds,
+    )
+    historical = payload["historical_summary"]
+    current = payload["current_summary"]
+    risk_gate = payload["risk_gate"]
+    data_gaps = compute_data_gaps(daily_records, trading_days)
+
+    print(f"current={normalize_model_family(current_version)}")
+    print(f"evaluation_status={current['evaluation_status']}")
+    print(f"historical_window={historical['window_start']}..{historical['window_end']}")
+    print(f"risk_gate={risk_gate['policy']} max_new_positions={risk_gate['max_new_positions']}")
+    if data_gaps:
+        print(f"data_gaps={[(g['start'], g['end']) for g in data_gaps]}")
+
     # 落盘
-    out = {"updated_at": datetime.now().isoformat(), "thresholds": thresholds,
-           "series": series, "summary": summary}
+    out = {"schema_version": 2, "updated_at": datetime.now().isoformat(), "thresholds": thresholds,
+           "series": series, "summary": summary,
+           "historical_summary": historical, "current_summary": current,
+           "risk_gate": risk_gate, "data_gaps": data_gaps}
     if args.dry_run:
         print("(dry-run, 未写回)")
     else:
