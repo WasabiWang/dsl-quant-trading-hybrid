@@ -72,6 +72,7 @@ def audit() -> dict:
 
         if issues:
             results["violations"].append({
+                "id": job.get('id'),
                 "name": name,
                 "actual": dict(actual),
                 "expected": expected_delivery,
@@ -82,25 +83,113 @@ def audit() -> dict:
 
     return results
 
+def build_edit_args(job_id: str, expected: dict) -> list:
+    """把期望的 delivery 配置映射为 `openclaw cron edit <id>` 的标志。
+
+    映射规则:
+      mode=announce → --announce; mode=none → --no-deliver
+      channel 有值 → --channel <c>; 为空 → --clear-channel
+      to      有值 → --to <dest>;   为空 → --clear-to
+      bestEffort=True → --best-effort-deliver; False → --no-best-effort-deliver
+
+    注意: --best-effort-deliver 单独使用会隐含 --announce, 所以 mode 标志始终
+    追加在最后。bestEffort=None 表示“该字段应不存在”, CLI 没有对应的清除标志
+    (只能设为 true/false), 因此不发标志, 由 fix_violations 的事后校验捕获。
+    """
+    args = ['openclaw', 'cron', 'edit', str(job_id)]
+    mode = expected.get('mode')
+
+    channel = expected.get('channel')
+    if channel:
+        args += ['--channel', str(channel)]
+    else:
+        args.append('--clear-channel')
+
+    to = expected.get('to')
+    if to:
+        args += ['--to', str(to)]
+    else:
+        args.append('--clear-to')
+
+    best_effort = expected.get('bestEffort')
+    if best_effort is True:
+        args.append('--best-effort-deliver')
+    elif best_effort is False:
+        args.append('--no-best-effort-deliver')
+
+    if mode == 'announce':
+        args.append('--announce')
+    elif mode == 'none':
+        args.append('--no-deliver')
+    return args
+
+
+def resolve_job_id(violation: dict, name_to_id: dict) -> str:
+    """优先使用审计记录中的 id, 回退到按名称匹配 cron list"""
+    job_id = violation.get('id')
+    if job_id:
+        return str(job_id)
+    return name_to_id.get(violation.get('name'))
+
+
+def get_job(job_id: str) -> dict:
+    """读取单个任务的当前快照 (校验用)"""
+    r = subprocess.run(['openclaw', 'cron', 'get', str(job_id), '--json'],
+                       capture_output=True, text=True, timeout=15)
+    if r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout)
+    except Exception:
+        return None
+
+
+def delivery_mismatch(job: dict, expected: dict) -> list:
+    """复刻 audit() 的比较方式, 检查 job 的 delivery 是否已达期望"""
+    actual = (job or {}).get('delivery', {}) or {}
+    return [f"{k}={actual.get(k)} (期望{v})"
+            for k, v in expected.items() if actual.get(k) != v]
+
+
 def fix_violations(violations: list) -> list:
-    """自动修复偏离的任务"""
+    """自动修复偏离的任务 (openclaw cron edit <id> ...), 并事后校验修复效果"""
     fixed = []
+    try:
+        name_to_id = {j.get('name'): j.get('id') for j in get_cron_list()}
+    except Exception as e:
+        name_to_id = {}
+        fixed.append(f"❌ 无法获取cron列表用于解析id: {e}")
+
     for v in violations:
         name = v["name"]
         expected = v["expected"]
+        job_id = resolve_job_id(v, name_to_id)
+        if not job_id:
+            fixed.append(f"❌ {name}: 无法解析任务id")
+            continue
+
+        cmd = build_edit_args(job_id, expected)
         try:
-            # 通过 cron update 修复
-            patch = {"delivery": expected}
-            r = subprocess.run(
-                ['openclaw', 'cron', 'update', '--name', name, '--json'],
-                input=json.dumps(patch), capture_output=True, text=True, timeout=10
-            )
-            if r.returncode == 0:
-                fixed.append(f"✅ {name}: 已修复")
-            else:
-                fixed.append(f"❌ {name}: 修复失败 - {r.stderr[:100]}")
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         except Exception as e:
             fixed.append(f"❌ {name}: 异常 - {e}")
+            continue
+
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or '').strip()
+            fixed.append(f"❌ {name}: 修复失败 - {err[:150]}")
+            continue
+
+        # 事后校验: 只有真正回到合规才报成功 (避免“假成功”)
+        job = get_job(job_id)
+        if job is None:
+            fixed.append(f"❌ {name}: 已执行edit但校验读取失败")
+            continue
+        remaining = delivery_mismatch(job, expected)
+        if remaining:
+            fixed.append(f"❌ {name}: 修复后仍偏离 - {'; '.join(remaining)}")
+        else:
+            fixed.append(f"✅ {name}: 已修复")
     return fixed
 
 
