@@ -1,0 +1,35 @@
+{
+  "_template": true,
+  "_note": "金标准基线【模板】。真实基线由私有环境运行 `python3 tests/golden_test.py --accept` 生成, 只保存计数+哈希指纹, 不含标的明细。本模板为占位值, 不可直接用于比对 (T1 会 FAIL)。",
+  "snapshot_format": 2,
+  "generated_at": "1970-01-01T00:00:00",
+  "version": "vX.Y.Z",
+  "privacy": {
+    "policy": "public-repo-safe",
+    "stored": [
+      "master_pool: count+hash",
+      "holidays: count+hash+list(公开)",
+      "scripts: count+hash",
+      "circuit_breaker_paused"
+    ],
+    "excluded": [
+      "标的代码明细 (master_pool_symbols)",
+      "脚本文件名清单"
+    ],
+    "source_of_truth": "私有 config/master_stock_pool.yaml (公开仓库排除)"
+  },
+  "master_pool": {
+    "count": 0,
+    "hash": ""
+  },
+  "holidays": {
+    "count": 0,
+    "hash": "",
+    "list": []
+  },
+  "scripts": {
+    "count": 0,
+    "hash": ""
+  },
+  "circuit_breaker_paused": null
+}

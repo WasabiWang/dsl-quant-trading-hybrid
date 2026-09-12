@@ -194,3 +194,9 @@ data_db/*.lock
 # P0池瘦身(2026-08-25): 观察池含标的明细, 不公开; bak备份防泄漏
 config/observation_pool.yaml
 config/*.bak-*
+
+# Golden 基线(2026-09-12): 真实基线是运行时产物、且由私有池派生, 不入库
+# (system_snapshot.json 已被上面的 `*.json` 覆盖)
+# 只提交模板与格式说明; 例外必须写在 `*.json` 规则之后才生效
+tests/golden_baseline/system_snapshot.json
+!tests/golden_baseline/system_snapshot.example.json

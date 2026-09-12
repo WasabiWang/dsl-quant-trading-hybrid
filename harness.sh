@@ -1,13 +1,22 @@
 #!/bin/bash
 # DSL Test Pyramid — Master Runner
-# 用法: ./harness.sh test [l0|l1|l2|l3|property|golden|all]
+# 用法: ./harness.sh test [l0|l1|l2|l3|property|golden|golden-strict|all]
 
 cd "$(dirname "$0")"
 
+# Python 解释器: 优先本地 venv, 否则回退系统 python3
+# (全新公开克隆/换机可能没有 .venv, 不能让 harness 在入口就报 no such file)
+PYTHON_BIN=".venv/bin/python3"
+if [ ! -x "$PYTHON_BIN" ]; then
+    PYTHON_BIN="$(command -v python3 || echo python3)"
+fi
+
+echo "🐍 Python: $PYTHON_BIN"
+
 run_test() {
-    local name="$1" script="$2"
+    local name="$1"; shift
     echo ""
-    PYTHONPATH="$(dirname "$0"):${PYTHONPATH:-}" .venv/bin/python3 "$script" 2>&1 | grep -v "error_handler\|feishu_alert\|INFO\|ERROR\|WARNING"
+    PYTHONPATH="$(dirname "$0"):${PYTHONPATH:-}" "$PYTHON_BIN" "$@" 2>&1 | grep -v "error_handler\|feishu_alert\|INFO\|ERROR\|WARNING"
     local rc=${PIPESTATUS[0]}
     if [ $rc -ne 0 ]; then
         echo "  ❌ $name FAILED (exit=$rc)"
@@ -36,6 +45,10 @@ case "${1:-all}" in
     golden)
         run_test "Golden-Test" tests/golden_test.py
         ;;
+    golden-strict)
+        # pre-deploy/CI: 基线必须齐备, 任何 SKIP(无私有配置/无基线)都算失败
+        run_test "Golden-Strict" tests/golden_test.py --strict
+        ;;
     quick)
         run_test "Harness-Quick" tests/harness.py -- --quick
         ;;
@@ -60,7 +73,7 @@ case "${1:-all}" in
         run_test "Pool-Structure" scripts/audit/pool_structure_audit.py
         ;;
     *)
-        echo "Usage: $0 {l0|l1|l2|l3|property|golden|quick|all|audit}"
+        echo "Usage: $0 {l0|l1|l2|l3|property|golden|golden-strict|quick|all|audit}"
         exit 1
         ;;
 esac
