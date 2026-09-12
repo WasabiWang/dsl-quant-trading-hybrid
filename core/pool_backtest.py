@@ -22,7 +22,8 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # A股涨跌停幅度 (板块差异化)
-from config.constants import COMMISSION_RATE as _CR, SLIPPAGE_BPS, LIMIT_RATES, get_slippage_bps
+from config.constants import (COMMISSION_RATE as _CR, SLIPPAGE_BPS, LIMIT_RATES,
+                              TRANSFER_FEE_RATE, get_slippage_bps)
 # P2-FIX: 使用统一成本计算器
 from core.trading_cost_calculator import TradingCostCalculator
 STAMP_TAX_RATE = 0.001  # 千分之一印花税 (卖出)
@@ -416,7 +417,7 @@ class PoolBacktestEngine:
                 value = shares * price
                 fee = max(value * commission_rate, 5)
                 stamp = value * STAMP_TAX_RATE
-                transfer_fee = value * 0.00001  # P2-FIX: 过户费 万0.1
+                transfer_fee = value * TRANSFER_FEE_RATE  # P2-FIX: 过户费 万0.1 (统一从 config/constants.py 读取)
                 cost = fee + stamp + transfer_fee
 
                 self.cash += value - cost
@@ -469,7 +470,7 @@ class PoolBacktestEngine:
                     action = 'BUY'
                     trade_value = trade_shares * price
                     fee = max(trade_value * commission_rate, 5)
-                    transfer_fee = trade_value * 0.00001  # P2-FIX: 过户费 万0.1
+                    transfer_fee = trade_value * TRANSFER_FEE_RATE  # P2-FIX: 过户费 万0.1 (统一从 config/constants.py 读取)
                     cost = fee + transfer_fee  # 买入无印花税
 
                     # 检查资金是否充足（买入时）
@@ -478,7 +479,7 @@ class PoolBacktestEngine:
                         trade_shares = max_shares
                         trade_value = trade_shares * price
                         fee = max(trade_value * commission_rate, 5)
-                        transfer_fee = trade_value * 0.00001  # P2-FIX: 过户费 万0.1
+                        transfer_fee = trade_value * TRANSFER_FEE_RATE  # P2-FIX: 过户费 万0.1 (统一从 config/constants.py 读取)
                         cost = fee + transfer_fee
 
                     if trade_shares >= 100:
@@ -512,7 +513,7 @@ class PoolBacktestEngine:
                     trade_value = sell_shares * price
                     fee = max(trade_value * commission_rate, 5)
                     stamp = trade_value * STAMP_TAX_RATE
-                    transfer_fee = trade_value * 0.00001  # P2-FIX: 过户费 万0.1
+                    transfer_fee = trade_value * TRANSFER_FEE_RATE  # P2-FIX: 过户费 万0.1 (统一从 config/constants.py 读取)
                     cost = fee + stamp
 
                     self.cash += trade_value - cost

@@ -160,16 +160,17 @@ def execute_trades(trades: list, market: str = "A", enforce_prediction_freshness
     # 仍从adaptive_params读取bs_active状态(用于日志和黑天鹅模式识别)
     # v4.7.x BUGFIX(09-07): 配置损坏(如LPPL未引号注入dict致ScannerError)曾让执行层启动即崩——
     # 此处改为防御性读取, 解析失败fallback默认值并告警, 不阻断交易执行(与get_planned_position一致)
-    bs_active, max_positions = False, 8
+    bs_active, max_positions = False, 3
     try:
         adaptive_path = os.path.join(PROJECT_ROOT, "config", "adaptive_params.yaml")
         with open(adaptive_path, "r", encoding="utf-8") as f:
             adaptive = yaml.safe_load(f)
         risk = adaptive.get("risk", {})
         bs_active = risk.get("black_swan_active", False)
-        max_positions = adaptive.get("trading", {}).get("max_positions", 8)  # P1:默认8(与morning_decision一致)
+        # v4.7.6 修复#4: 原默认 8, 与 config:trading.max_positions(=3) 脱节 → 改为 fail-closed 3
+        max_positions = adaptive.get("trading", {}).get("max_positions", 3)
     except Exception as _cfg_err:
-        print(f"⚠️ adaptive_params.yaml解析失败, 使用默认风控参数(bs_active=False, max_positions=8): {_cfg_err}")
+        print(f"⚠️ adaptive_params.yaml解析失败, 使用默认风控参数(bs_active=False, max_positions=3): {_cfg_err}")
     
     # v4.6.x P2: 分级仓位约束 — 按股票池tier限制资金分配比例
     tier_limits = {}

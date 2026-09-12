@@ -9,6 +9,11 @@ DSL量化交易系统 — 统一常量定义
 # v4.5.12 fix: 统一佣金为万2.5（个人投资者真实水平），消除paper_trader/backtest/execute之间的不一致
 COMMISSION_RATE = 0.00025          # 佣金万2.5 (个人投资者真实水平)
 STAMP_TAX_RATE = 0.001             # 印花税千分之一 (仅卖出)
+# 过户费：双向收取。依据 A股现行收费标准：2022-04-29 起沪深过户费统一下调至
+# 成交金额的 0.001%(万0.1)，买卖双边各收一次（中国结算收取）。
+# v4.5.13 fix: 此前 constants.py 未定义该常量，pool_backtest 硬编码 0.00001、
+# replay_realistic 用 getattr 兜底，现统一为此常量。
+TRANSFER_FEE_RATE = 0.00001         # 过户费 万0.1 (双向)
 MIN_COMMISSION = 5                  # 最低佣金5元
 MIN_TRADE_UNIT = 100                # A股最小交易单位100股 (主板/创业板，科创板见 get_min_trade_unit)
 MIN_TRADE_UNIT_STAR = 200           # 科创板200股

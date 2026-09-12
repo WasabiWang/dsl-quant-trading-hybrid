@@ -60,6 +60,11 @@ RETURN_MAG_STEEPNESS = 0.01     # 收益幅度陡峭度: |ret|≈1% → mag≈0.
 # ── v4.5.2: pool降级阈值 (A: 提升至0.5%) ──
 POOL_SIGNAL_THRESHOLD = 0.005   # 与h5d统一为±0.5%
 
+# v4.7.6 (edge 验证 P0): 历史百分位特征窗口参数
+# 去前视(只用 t 及以前) + 训练/推理口径统一; 与 predictor/features.py:244 既有写法一致
+_PCT_WINDOW = 250
+_PCT_MIN = 60
+
 CONFIDENCE_THRESHOLD = 0.58     # pool模型信心阈值保持不变
 
 # ── v4.6.x: 增强预测报告合并窗口 ──
@@ -674,12 +679,16 @@ def build_h20d_features(df: pd.DataFrame) -> pd.DataFrame:
         feats[f"fund_{k}"] = 0.0
 
     # — v4.5.7: 截面特征 — 历史百分位（票内rank）(12维) —
+    # — v4.5.7: 截面特征 — 历史百分位（票内rank）(12维) —
+    # v4.7.6 修复(edge 验证 P0): 原用 `rank(pct=True)` 在**整段序列**上求分位 →
+    #   每行分位依赖其后样本(结构性前视); 且训练(全量 df)与推理(截断 df)口径不一致(train-serve skew)。
+    #   改为 250 日滚动分位(与 predictor/features.py:244 一致), 只用 t 及以前数据。
     for n, period in [("5", 5), ("10", 10), ("20", 20), ("60", 60)]:
         if f"mom_{period}d" in feats.columns:
-            feats[f"mom_{n}d_pct"] = feats[f"mom_{period}d"].rank(pct=True)
+            feats[f"mom_{n}d_pct"] = feats[f"mom_{period}d"].rolling(_PCT_WINDOW, min_periods=_PCT_MIN).rank(pct=True)
         if f"vol{period}d" in feats.columns:
-            feats[f"vol_{n}d_pct"] = feats[f"vol{period}d"].rank(pct=True)
-        feats[f"vol_ratio_{n}_pct"] = feats.get(f"vol_ratio_{period}", pd.Series(0, index=feats.index)).rank(pct=True)
+            feats[f"vol_{n}d_pct"] = feats[f"vol{period}d"].rolling(_PCT_WINDOW, min_periods=_PCT_MIN).rank(pct=True)
+        feats[f"vol_ratio_{n}_pct"] = feats.get(f"vol_ratio_{period}", pd.Series(0, index=feats.index)).rolling(_PCT_WINDOW, min_periods=_PCT_MIN).rank(pct=True)
 
     # — v4.5.7: 情绪因子 (8维) —
     feats["vp_divergence_5"] = feats["mom_5d"] * (1 - feats["vol_ratio_5"])

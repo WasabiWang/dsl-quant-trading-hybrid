@@ -51,6 +51,11 @@ N_FOLDS = 5
 TEST_SPLIT = 0.2
 DIR_THRESHOLD = 0.52
 
+# v4.7.6 (edge 验证 P0): 历史百分位特征窗口参数
+# 去前视(只用 t 及以前) + 训练/推理口径统一; 与 predictor/features.py:244 既有写法一致
+_PCT_WINDOW = 250
+_PCT_MIN = 60
+
 # v4.5.3c: 废弃硬编码黑名单 → 改用 tier 自动分层
 # 仅观察层(cyclical/flex)跳过训练, 蓝筹/核心/成长全量训练
 # 训练后模型性能不足的, 由 dynamic_threshold+signal_weight 在后端抑制
@@ -190,15 +195,19 @@ def build_features(df: pd.DataFrame, fundamentals: dict = None) -> pd.DataFrame:
             feats[f"target_{h}d_dir"] = (target > 0.005).astype(int)
 
     # — v4.5.7: 截面特征 — 历史百分位（票内rank）(12维) —
+    # — v4.5.7: 截面特征 — 历史百分位（票内rank）(12维) —
+    # v4.7.6 修复(edge 验证 P0): 原用 `rank(pct=True)` 在**整段序列**上求分位 →
+    #   每行分位依赖其后样本(结构性前视); 且训练(全量 df)与推理(截断 df)口径不一致(train-serve skew)。
+    #   改为 250 日滚动分位(与 predictor/features.py:244 既有写法一致), 只用 t 及以前数据。
     for n, period in [("5", 5), ("10", 10), ("20", 20), ("60", 60)]:
         # 动量百分位
         if f"mom_{period}d" in feats.columns:
-            feats[f"mom_{n}d_pct"] = feats[f"mom_{period}d"].rank(pct=True)
+            feats[f"mom_{n}d_pct"] = feats[f"mom_{period}d"].rolling(_PCT_WINDOW, min_periods=_PCT_MIN).rank(pct=True)
         # 波动百分位
         if f"vol{period}d" in feats.columns:
-            feats[f"vol_{n}d_pct"] = feats[f"vol{period}d"].rank(pct=True)
+            feats[f"vol_{n}d_pct"] = feats[f"vol{period}d"].rolling(_PCT_WINDOW, min_periods=_PCT_MIN).rank(pct=True)
         # 成交量百分位
-        feats[f"vol_ratio_{n}_pct"] = feats.get(f"vol_ratio_{period}", pd.Series(0, index=feats.index)).rank(pct=True)
+        feats[f"vol_ratio_{n}_pct"] = feats.get(f"vol_ratio_{period}", pd.Series(0, index=feats.index)).rolling(_PCT_WINDOW, min_periods=_PCT_MIN).rank(pct=True)
 
     # — v4.5.7: 情绪因子 (8维) —
     # 量价背离: 价涨量缩/价跌量放 = 情绪反转信号

@@ -1628,7 +1628,18 @@ def plan_trades(alpha_scores, daily_predictions, final_position, trader=None,
     # 按评分排序取前5，但受持仓上限约束
     # v4.5.8.1: 修复#2 — 持仓无上限 (MAX_POSITIONS=8)
     # v4.5.9b: 修复#3 — Tier-1(双确认)永远优先于Tier-2(单确认)；已持仓加仓不占新买名额
-    MAX_POSITIONS = 8  # 最大持仓数
+    # v4.7.6 修复#4: 原硬编码 MAX_POSITIONS=8 与 config/adaptive_params.yaml:trading.max_positions(=3)
+    #   脱节, 计划敞口被静默放大约 2.67 倍。风控阈值必须从配置读取;
+    #   读取失败时 fail-closed 取保守值 3, 禁止回退到 8。
+    try:
+        import yaml as _yaml_mp
+        with open(os.path.join(PROJECT_ROOT, 'config', 'adaptive_params.yaml'),
+                  'r', encoding='utf-8') as _f_mp:
+            _trading_mp = (_yaml_mp.safe_load(_f_mp) or {}).get('trading', {}) or {}
+        MAX_POSITIONS = max(1, int(_trading_mp.get('max_positions', 3)))
+    except Exception as _e_mp:
+        print(f"  ⚠️ 读取 trading.max_positions 失败({_e_mp}), fail-closed 使用 3")
+        MAX_POSITIONS = 3
     current_count = len(current_positions)
     sell_count = len(sell_candidates)
     max_new_buys = MAX_POSITIONS - (current_count - sell_count)
@@ -1806,31 +1817,49 @@ def calculate_final_position(macro_score, sector_scores, risk_data):
     return round(final_position, 2)
 
 def get_current_drawdown():
-    """获取当前组合最大回撤（从paper_trader或adaptive_params读取）
-    v4.5.3c fix: 确保scripts/在sys.path中, 修复黑天鹅涨仓误报
+    """获取当前组合真实回撤（高水位法, 百分比）
+
+    v4.7.6 修复#1(红队 R1 指出): 原实现用 `total_return_pct` 冒充回撤,
+    且 "盈利状态 → 无需回撤保护" 直接返回 0.0 —— 于是净值从高点回落时保护恒不触发
+    (例: +20% 回落到 +8%, 真实回撤 10%, 旧实现返回 0)。
+    现改为真实高水位回撤: (peak_equity - current_equity) / peak_equity * 100
     """
     # v4.5.3c: 确保import路径兼容
     sys.path.insert(0, os.path.join(PROJECT_ROOT, 'scripts'))
     try:
         from paper_trader import PaperTrader
         pt = PaperTrader()
-        summary = pt.get_portfolio_summary()
-        ret_pct = summary.get('total_return_pct', 0) if summary else 0
-        if ret_pct < 0:
-            return min(abs(ret_pct), 30.0)
-        # 盈利状态 → 无需回撤保护
-        return 0.0
+        summary = pt.get_portfolio_summary() or {}
+        equity = summary.get('total_value')
+        peak = summary.get('peak_equity')
+        if peak is None:
+            # 兼容未暴露 peak_equity 的旧 summary: 直接读 ledger
+            try:
+                with pt._get_conn() as _conn:
+                    _row = _conn.execute(
+                        "SELECT value FROM ledger WHERE key='peak_equity'").fetchone()
+                    peak = float(_row["value"]) if _row else None
+            except Exception:
+                peak = None
+        if equity and peak and float(peak) > 0:
+            dd = (float(peak) - float(equity)) / float(peak) * 100.0
+            return round(max(0.0, min(dd, 100.0)), 2)
     except Exception:
         pass
     # fallback: 黑天鹅风险推断（当paper_trader不可用时）
     # v4.5.5 S6: 统一使用adaptive_params.yaml的black_swan_position_ratio
+    # ⚠️ 此处返回的是**推断的保守代理值**, 不是真实回撤; 待 #5b 拆分为独立命名与字段。
     try:
         import yaml
         with open(os.path.join(PROJECT_ROOT, 'config', 'adaptive_params.yaml'), 'r') as f:
             params = yaml.safe_load(f)
         bs_active = params.get('risk', {}).get('black_swan_active', False)
         bs_ratio = float(params.get('risk', {}).get('black_swan_position_ratio', 1.0))
-        if bs_active and bs_ratio < 0.6:
+        # v4.7.6 修复#1: 原为 `bs_ratio < 0.6`, 而配置值恰为 0.6 → 条件恒假, 回撤保护永不触发。
+        #   改为闭区间 (<=), 使 "ratio 降至触发阈值" 时保护真正生效。
+        #   TODO(#2, 待回测): 触发阈值应与取值同源于 risk_state 快照, 避免阈值/取值再次漂移。
+        _DRAWDOWN_PROTECT_TRIGGER = 0.6
+        if bs_active and bs_ratio <= _DRAWDOWN_PROTECT_TRIGGER:
             print(f"  🛡️ 黑天鹅活跃: position_ratio={bs_ratio}, 触发回撤保护")
             return 8.0 if bs_ratio < 0.5 else 5.0
     except Exception:

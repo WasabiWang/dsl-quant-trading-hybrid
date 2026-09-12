@@ -292,9 +292,10 @@ def execute_trades(trades: list, market: str = "A", dry_run: bool = False) -> li
         config_path = os.path.join(PROJECT_ROOT, "config", "adaptive_params.yaml")
         with open(config_path) as f:
             params = yaml.safe_load(f)
-        max_positions = params.get("trading", {}).get("max_positions", 5)
+        # v4.7.6 修复#4: 默认值由 5 改为 3, 与 config:trading.max_positions 对齐(缺失/非法时 fail-closed)
+        max_positions = params.get("trading", {}).get("max_positions", 3)
     except Exception:
-        max_positions = 5
+        max_positions = 3
 
     # 1️⃣  先执行卖出
     sell_trades = [t for t in trades if t.get("action", "").upper() == "SELL"]

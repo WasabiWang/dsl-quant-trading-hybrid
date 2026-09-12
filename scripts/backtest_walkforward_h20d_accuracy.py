@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """
-DSL v4.5.1 H20D Walk-Forward OOS Direction Accuracy
+DSL H20D Walk-Forward OOS Direction Accuracy (评估路径 · 阶段1时点一致性修复版)
 严格样本外方向精度统计 — 无交易模拟，无未来信息泄露
+
+阶段1修复 (FX-1/FX-2/FX-3, 仅评估路径, 不碰生产路径):
+- FX-2 复权统一: --adjust {hfq(新默认)/qfq(旧行为)} → 统一走 common/adjust.py 入口
+- FX-1 时点宇宙: --universe {point_in_time(新默认)/snapshot(旧行为)/both}
+- FX-3 基本面:   --fund {drop(新默认)/keep(旧行为)} — 剔除无 ann_date 的 fund_* 特征
+所有旧行为均可通过开关复现, 不静默替换。
 
 方法:
 - 滚动窗口: 每90天一个窗口，用窗口前数据训练 LightGBM
 - 对每个窗口的测试期，每天用模型预测未来20日收益方向
 - 跨窗口汇总每只股票的 OOS direction_accuracy
-
-对比: 全历史滚动精度 (train_predictor_enhanced.py 的 ens_acc 测试集精度)
 """
-import os, sys, json, yaml, gc, time
+import os, sys, json, yaml, gc, time, argparse
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 import numpy as np
@@ -23,8 +27,9 @@ os.chdir(PROJECT_ROOT)
 sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "scripts"))
 
-from dsl_data_sdk_original import get_kline, normalize_symbol
+from dsl_data_sdk_original import normalize_symbol
 from train_predictor_enhanced import build_features, fetch_fundamentals
+from common.adjust import get_kline_adjusted, ADJUST_STANDARD
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import SelectFromModel
 import lightgbm as lgb
@@ -33,84 +38,131 @@ warnings.filterwarnings("ignore")
 
 # ====== 参数 ======
 HORIZON = 20
-BACKTEST_DAYS = 730       # 回测2年
 WINDOW_DAYS = 90          # 每季度切换窗口
 MIN_TRAIN_SAMPLES = 200   # 每只至少 200 训练样本才训练
 MIN_OOS_PREDICTIONS = 50  # 每只至少 50 次 OOS 预测才计入
 TIMEOUT_GLOBAL = 1200     # 全局超时秒数
 MAX_WORKERS = 3           # 并行线程数
 
-# ====== 加载股票池 ======
-with open("config/master_stock_pool.yaml") as f:
-    raw_pool = yaml.safe_load(f)["master_pool"]
-pool = [s for s in raw_pool if "." not in s["symbol"]]
-CODES = [s["symbol"] for s in pool]
-NAMES = {s["symbol"]: s.get("name", s["symbol"]) for s in pool}
-print(f"🚀 H20D Walk-Forward OOS 精度评估: {len(CODES)}只 × {BACKTEST_DAYS//WINDOW_DAYS}窗口")
-print(f"   参数: horizon={HORIZON}d window={WINDOW_DAYS}d backtest={BACKTEST_DAYS}d")
-print(f"   并行: {MAX_WORKERS}线程  最小训练样本: {MIN_TRAIN_SAMPLES}")
+# ====== FX-1: 池成分时间线 (从可得快照重建) ======
+# 快照来源 (文件 mtime) + 每股 pool_updated_at 字段。
+# 关键事实: master_stock_pool 系列快照最早只到 2026-08-25 (及 .bak-20260825 内
+# 每股 pool_updated_at 最早 2026-08-01), 而回测起点 ≈ 730 天前(2024-09 前后)。
+# → 回测起点当日宇宙**不可考**, 只能重建 2026-08 以来的约 5 周 churn。
+POOL_SNAPSHOTS = [
+    # (快照日期, 文件路径, 说明)
+    ("2026-08-25", "config/master_stock_pool.yaml.bak-20260825", "master_pool 最早可得快照"),
+    ("2026-08-30", "config/master_stock_pool.yaml.bak.poolacc", "poolacc 备份"),
+    ("2026-09-06", "config/master_stock_pool.yaml", "当前 master_pool"),
+]
+
+UNIVERSE_UNKNOWABLE_BEFORE = "2026-08-25"  # 早于此时点的宇宙成分不可考
 
 
-def evaluate_stock(code: str, name: str) -> dict:
+def _read_pool_symbols(path: str) -> set:
+    with open(path) as f:
+        data = yaml.safe_load(f)
+    raw = data.get("master_pool", []) if isinstance(data, dict) else []
+    return {str(s["symbol"]) for s in raw if "." not in str(s["symbol"])}
+
+
+def build_universe_timeline() -> dict:
+    """重建带时间戳的 master_pool 成分表; 返回 {date: {symbols}}。"""
+    timeline = {}
+    for date, path, note in POOL_SNAPSHOTS:
+        if os.path.exists(path):
+            timeline[date] = _read_pool_symbols(path)
+    return timeline
+
+
+def resolve_universe(mode: str) -> tuple:
+    """
+    返回 (universe_symbols, meta_dict)。
+    - snapshot:       旧行为 → 当前 master_stock_pool.yaml
+    - point_in_time:  新默认 → 最早可得快照的成分 (标注回测起点宇宙不可考)
+    """
+    timeline = build_universe_timeline()
+    if mode == "snapshot":
+        cur = timeline.get("2026-09-06", set())
+        meta = {
+            "mode": "snapshot",
+            "snapshot_date": "2026-09-06",
+            "universe": sorted(cur),
+            "note": "旧行为: 用当前池回测 730 天历史(前视选池)",
+        }
+        return sorted(cur), meta
+    # point_in_time (新默认): 最早可得快照
+    earliest_date = UNIVERSE_UNKNOWABLE_BEFORE
+    earliest = timeline.get(earliest_date, set())
+    meta = {
+        "mode": "point_in_time",
+        "snapshot_date": earliest_date,
+        "universe": sorted(earliest),
+        "note": (
+            f"新默认: 只用 {earliest_date} 当日已知成分。"
+            f"⚠️ 回测起点({datetime.now() - timedelta(days=730):%Y-%m-%d} 前后)宇宙不可考, "
+            f"本快照仍晚于回测起点, 因此差额是 {earliest_date}→2026-09-06 的 churn, "
+            f"非完整 730 天前视选池贡献(无法量化)。"
+        ),
+        "unknowable_before": UNIVERSE_UNKNOWABLE_BEFORE,
+    }
+    return sorted(earliest), meta
+
+
+def evaluate_stock(code: str, name: str, backtest_days: int, adjust: str, drop_fund: bool) -> dict:
     """对单只股票执行 walk-forward OOS 方向精度评估"""
-    t0 = time.time()
     try:
-        # 1. 拉取数据（4年+确保训练+回测数据充足）
         end_date = datetime.now().strftime("%Y-%m-%d")
-        start_date = (datetime.now() - timedelta(days=int(BACKTEST_DAYS * 2.2))).strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=int(backtest_days * 2.2))).strftime("%Y-%m-%d")
 
-        kline = get_kline(normalize_symbol(code), start_date, end_date)
-        if not kline or len(kline) < 350:
+        # FX-2: 统一复权入口 (新默认 hfq; --adjust qfq 复现旧行为)
+        kdf = get_kline_adjusted(code, start_date, end_date, adjust=adjust)
+        if kdf is None or len(kdf) < 350:
             return None
 
-        df = pd.DataFrame(kline)
+        df = kdf.reset_index(drop=True)
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.set_index("date")
         for c in ["close", "volume", "high", "low", "open"]:
             df[c] = df[c].astype(float)
 
-        # 2. 基本面
-        fundamentals = fetch_fundamentals(code)
+        # FX-3: 默认剔除基本面 (无 ann_date, 无法保证时点一致); --fund keep 复现旧行为
+        fundamentals = None if drop_fund else fetch_fundamentals(code)
 
-        # 3. 构建56维特征 + target_20d
         feats = build_features(df, fundamentals).replace([np.inf, -np.inf], np.nan)
         tcol = f"target_{HORIZON}d"
+
+        # FX-3: drop 模式下把可能残留的 fund_* 列一并剔除 (双保险)
+        if drop_fund:
+            feats = feats[[c for c in feats.columns if not c.startswith("fund_")]]
+
         fcols = [c for c in feats.columns if not c.startswith("target_")]
 
         if tcol not in feats.columns or feats[tcol].notna().sum() < MIN_TRAIN_SAMPLES:
             return None
 
-        # 4. 特征NaN填充为0（滚动窗口初期无值→无偏离基线，LightGBM可自行处理但StandardScaler不能）
         feats[fcols] = feats[fcols].fillna(0)
 
-        # 5. 所有行可用，只需target有效
         all_idx = feats.index.tolist()
-        # v4.7.2 P2-1: 放宽总行数要求 — 原BACKTEST_DAYS+MIN_TRAIN_SAMPLES(930行)导致次新股(如688525 2022年上市仅883交易日)永远无法评估
-        # 新要求: 至少能组成1个窗口的测试期+前置训练样本; 窗口循环内部已有MIN_TRAIN_SAMPLES与MIN_OOS_PREDICTIONS双重门槛保证质量
         if len(all_idx) < MIN_TRAIN_SAMPLES + WINDOW_DAYS:
             return None
 
-        # 6. 回测期 = 最后 BACKTEST_DAYS 行
-        bt_start = len(all_idx) - BACKTEST_DAYS
+        bt_start = len(all_idx) - backtest_days
         bt_indices = all_idx[bt_start:]
 
         all_predictions = []
-        next_report_pct = 10  # 进度报告
 
-        # 7. 窗口滚动（约8个窗口）
         for w in range(0, len(bt_indices), WINDOW_DAYS):
             w_end = min(w + WINDOW_DAYS, len(bt_indices))
             test_dates = bt_indices[w:w_end]
-
             if len(test_dates) < 5:
                 continue
 
-            # 训练截止 = test_dates第一行
             train_end_pos = all_idx.index(test_dates[0])
             train_idx = all_idx[:train_end_pos]
-
             if len(train_idx) < MIN_TRAIN_SAMPLES:
                 continue
 
-            # 训练数据：所有行(tcol有效的才参与训练)
             train_data = feats.loc[train_idx]
             target_valid = train_data[tcol].notna()
             if target_valid.sum() < MIN_TRAIN_SAMPLES:
@@ -119,47 +171,37 @@ def evaluate_stock(code: str, name: str) -> dict:
             X_tr = train_data.loc[target_valid, fcols].values
             y_tr = train_data.loc[target_valid, tcol].values
 
-            # 80/20 按时间分割（与 backtest_walkforward.py 一致）
             split = int(len(X_tr) * 0.8)
             X_tr_80, y_tr_80 = X_tr[:split], y_tr[:split]
 
             try:
                 scaler = StandardScaler()
                 X_scaled = scaler.fit_transform(X_tr_80)
-
                 selector = SelectFromModel(
                     lgb.LGBMRegressor(n_estimators=50, random_state=42, verbose=-1),
                     threshold="median", max_features=40
                 )
                 X_sel = selector.fit_transform(X_scaled, y_tr_80)
-
                 model = lgb.LGBMRegressor(
                     n_estimators=200, max_depth=6, learning_rate=0.03,
                     random_state=42, verbose=-1, n_jobs=1,
                 )
                 model.fit(X_sel, y_tr_80)
 
-                # 预测测试期
                 for test_idx in test_dates:
                     if test_idx not in feats.index:
                         continue
                     row = feats.loc[test_idx]
                     if pd.isna(row[tcol]):
                         continue
-
                     X_test = scaler.transform([row[fcols].values])
                     X_test_sel = selector.transform(X_test)
                     pred = float(model.predict(X_test_sel)[0])
                     actual = float(row[tcol])
-
-                    all_predictions.append((
-                        1 if pred > 0 else -1,
-                        1 if actual > 0 else -1,
-                    ))
+                    all_predictions.append((1 if pred > 0 else -1, 1 if actual > 0 else -1))
             except Exception:
                 continue
 
-        # 8. 计算指标
         if len(all_predictions) < MIN_OOS_PREDICTIONS:
             return None
 
@@ -169,158 +211,145 @@ def evaluate_stock(code: str, name: str) -> dict:
         tn = sum(1 for pd_, ad_ in all_predictions if pd_ == -1 and ad_ == -1)
         fp = sum(1 for pd_, ad_ in all_predictions if pd_ == 1 and ad_ == -1)
         fn = sum(1 for pd_, ad_ in all_predictions if pd_ == -1 and ad_ == 1)
-
-        accuracy = correct / total
         tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
         tnr = tn / (tn + fp) if (tn + fp) > 0 else 0
 
         return {
-            "direction_accuracy": round(accuracy, 4),
+            "direction_accuracy": round(correct / total, 4),
             "total_predictions": total,
             "correct": correct,
             "wrong": total - correct,
             "true_positive_rate": round(tpr, 4),
             "true_negative_rate": round(tnr, 4),
-            "predicted_ups": tp + fp,
-            "predicted_downs": tn + fn,
-            "actual_ups": tp + fn,
-            "actual_downs": tn + fp,
         }
-
-    except Exception as e:
+    except Exception:
         return None
 
 
-def main():
+def _summarize(results: dict, label: str, elapsed: float) -> dict:
+    if not results:
+        return {"label": label, "stocks_evaluated": 0, "note": "无有效结果"}
+    accs = [v["direction_accuracy"] for v in results.values()]
+    preds = [v["total_predictions"] for v in results.values()]
+    return {
+        "label": label,
+        "stocks_evaluated": len(results),
+        "mean_accuracy": round(float(np.mean(accs)), 4),
+        "median_accuracy": round(float(np.median(accs)), 4),
+        "std_accuracy": round(float(np.std(accs)), 4),
+        "min_accuracy": round(float(np.min(accs)), 4),
+        "max_accuracy": round(float(np.max(accs)), 4),
+        "stocks_above_50pct": int(sum(1 for a in accs if a > 0.50)),
+        "stocks_above_55pct": int(sum(1 for a in accs if a > 0.55)),
+        "total_oos_predictions": int(np.sum(preds)),
+        "elapsed_seconds": round(elapsed, 1),
+    }
+
+
+def run_universe(symbols: list, names: dict, backtest_days: int, adjust: str, drop_fund: bool) -> tuple:
     start_time = time.time()
-
     results = {}
-    evaluated_count = 0
-    failed_count = 0
-
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {}
-        for s in pool:
-            code = s["symbol"]
-            name = s.get("name", code)
-            future = executor.submit(evaluate_stock, code, name)
-            futures[future] = code
-
+        futures = {executor.submit(evaluate_stock, c, names.get(c, c), backtest_days, adjust, drop_fund): c
+                   for c in symbols}
         try:
             for future in as_completed(futures, timeout=TIMEOUT_GLOBAL):
                 code = futures[future]
                 try:
-                    result = future.result(timeout=5)
-                    if result:
-                        results[code] = result
-                        evaluated_count += 1
-                        bar = "✅" if result["direction_accuracy"] > 0.5 else "⚠️"
-                        print(f"  {bar} {code} {NAMES.get(code, '')}: "
-                              f"acc={result['direction_accuracy']:.2%} "
-                              f"n={result['total_predictions']} "
-                              f"tpr={result['true_positive_rate']:.2%} "
-                              f"tnr={result['true_negative_rate']:.2%}")
-                    else:
-                        failed_count += 1
-                        print(f"  ⏭️ {code}: 数据不足或评估失败")
-                except Exception as e:
-                    failed_count += 1
-                    print(f"  ❌ {code}: 异常 {e}")
+                    r = future.result(timeout=5)
+                    if r:
+                        results[code] = r
+                except Exception:
+                    pass
         except TimeoutError:
-            remaining = sum(1 for f in futures if not f.done())
-            print(f"  ⏰ 全局超时! {remaining}只未完成")
-            for future in futures:
-                if future.done():
-                    code = futures[future]
-                    try:
-                        result = future.result(timeout=2)
-                        if result and code not in results:
-                            results[code] = result
-                            evaluated_count += 1
-                    except Exception:
-                        pass
+            pass
+    return results, time.time() - start_time
 
-    elapsed = time.time() - start_time
 
-    if not results:
-        print("\n❌ 无有效回测结果!")
-        return None, None
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--universe", choices=["snapshot", "point_in_time", "both"], default="both",
+                        help="snapshot=旧行为(当前池); point_in_time=新默认(最早可得快照); both=两者对照")
+    parser.add_argument("--adjust", choices=["hfq", "qfq"], default=ADJUST_STANDARD,
+                        help="hfq=后复权(新默认); qfq=前复权(旧行为)")
+    parser.add_argument("--fund", choices=["drop", "keep"], default="drop",
+                        help="drop=剔除fund_*(新默认, 无ann_date); keep=保留(旧行为)")
+    parser.add_argument("--codes", nargs="*", default=None, help="仅评估指定代码(冒烟测试用)")
+    parser.add_argument("--backtest-days", type=int, default=730, help="回测天数(默认730)")
+    args = parser.parse_args()
 
-    accuracies = [v["direction_accuracy"] for v in results.values()]
-    total_preds = [v["total_predictions"] for v in results.values()]
+    drop_fund = (args.fund == "drop")
+    backtest_days = args.backtest_days
 
-    dist = {"below_40": 0, "40_45": 0, "45_50": 0, "50_55": 0, "55_60": 0, "60_plus": 0}
-    for a in accuracies:
-        if a < 0.40:
-            dist["below_40"] += 1
-        elif a < 0.45:
-            dist["40_45"] += 1
-        elif a < 0.50:
-            dist["45_50"] += 1
-        elif a < 0.55:
-            dist["50_55"] += 1
-        elif a < 0.60:
-            dist["55_60"] += 1
-        else:
-            dist["60_plus"] += 1
+    snapshot_symbols, snap_meta = resolve_universe("snapshot")
+    pit_symbols, pit_meta = resolve_universe("point_in_time")
 
-    summary = {
-        "stocks_evaluated": evaluated_count,
-        "stocks_failed": failed_count,
-        "mean_accuracy": round(float(np.mean(accuracies)), 4),
-        "median_accuracy": round(float(np.median(accuracies)), 4),
-        "std_accuracy": round(float(np.std(accuracies)), 4),
-        "min_accuracy": round(float(np.min(accuracies)), 4),
-        "max_accuracy": round(float(np.max(accuracies)), 4),
-        "stocks_above_50pct": sum(1 for a in accuracies if a > 0.50),
-        "stocks_above_55pct": sum(1 for a in accuracies if a > 0.55),
-        "stocks_above_60pct": sum(1 for a in accuracies if a > 0.60),
-        "total_oos_predictions": int(np.sum(total_preds)),
-        "elapsed_seconds": round(elapsed, 1),
-        "accuracy_distribution": dist,
-    }
+    names = {}
+    for s in snapshot_symbols + pit_symbols:
+        names[s] = s
+    if os.path.exists("config/master_stock_pool.yaml"):
+        with open("config/master_stock_pool.yaml") as f:
+            for s in yaml.safe_load(f)["master_pool"]:
+                if "." not in str(s["symbol"]):
+                    names[str(s["symbol"])] = s.get("name", s["symbol"])
+
+    if args.codes:
+        snapshot_symbols = [c for c in snapshot_symbols if c in args.codes]
+        pit_symbols = [c for c in pit_symbols if c in args.codes]
+
+    print(f"🚀 H20D Walk-Forward OOS (评估路径·阶段1修复版)")
+    print(f"   universe={args.universe} adjust={args.adjust} fund={args.fund} backtest={backtest_days}d")
+    print(f"   snapshot池: {len(snapshot_symbols)}只 | point_in_time池: {len(pit_symbols)}只")
+
+    universes = []
+    if args.universe in ("snapshot", "both"):
+        universes.append(("snapshot", snapshot_symbols, snap_meta))
+    if args.universe in ("point_in_time", "both"):
+        universes.append(("point_in_time", pit_symbols, pit_meta))
 
     output = {
         "evaluated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "method": "walk_forward_oos",
         "params": {
-            "horizon": HORIZON,
-            "window_days": WINDOW_DAYS,
-            "backtest_days": BACKTEST_DAYS,
-            "min_train_samples": MIN_TRAIN_SAMPLES,
-            "min_oos_predictions": MIN_OOS_PREDICTIONS,
+            "horizon": HORIZON, "window_days": WINDOW_DAYS, "backtest_days": backtest_days,
+            "adjust": args.adjust, "fund": args.fund, "universe": args.universe,
         },
-        "per_stock": results,
-        "summary": summary,
+        "universe_meta": {"snapshot": snap_meta, "point_in_time": pit_meta},
+        "universe_delta": {
+            "snapshot_count": len(snapshot_symbols),
+            "point_in_time_count": len(pit_symbols),
+            "only_in_snapshot": sorted(set(snapshot_symbols) - set(pit_symbols)),
+            "only_in_point_in_time": sorted(set(pit_symbols) - set(snapshot_symbols)),
+        },
+        "per_universe": {},
     }
 
+    for label, symbols, meta in universes:
+        print(f"\n▶ 运行 {label} 宇宙 ({len(symbols)}只)...")
+        results, elapsed = run_universe(symbols, names, backtest_days, args.adjust, drop_fund)
+        summ = _summarize(results, label, elapsed)
+        output["per_universe"][label] = {"summary": summ, "per_stock": results}
+        print(f"   {label}: 评估{summ.get('stocks_evaluated',0)}只 "
+              f"mean_acc={summ.get('mean_accuracy',0):.2%} "
+              f"median={summ.get('median_accuracy',0):.2%}")
+
+    # 差额 (前视选池贡献的上限代理)
+    if "snapshot" in output["per_universe"] and "point_in_time" in output["per_universe"]:
+        s = output["per_universe"]["snapshot"]["summary"]
+        p = output["per_universe"]["point_in_time"]["summary"]
+        if s.get("stocks_evaluated") and p.get("stocks_evaluated"):
+            output["universe_delta"]["mean_accuracy_delta"] = round(
+                s["mean_accuracy"] - p["mean_accuracy"], 4)
+
     os.makedirs("reports/h20d_evaluation", exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = f"reports/h20d_evaluation/evaluation_h20d_oos_{timestamp}.json"
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = f"reports/h20d_evaluation/eval_fix1_{args.universe}_{args.adjust}_fund{args.fund}_{ts}.json"
     with open(out_path, "w") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
 
-    print(f"\n{'='*60}")
-    print(f"📊 H20D Walk-Forward OOS 方向精度评估完成 ({elapsed:.0f}s)")
-    print(f"{'='*60}")
-    print(f"  评估标的: {summary['stocks_evaluated']}只 (失败{summary['stocks_failed']}只)")
-    print(f"  OOS预测总次数: {summary['total_oos_predictions']:,}")
-    print(f"  均值精度: {summary['mean_accuracy']:.2%}")
-    print(f"  中位数:   {summary['median_accuracy']:.2%}")
-    print(f"  标准差:   {summary['std_accuracy']:.2%}")
-    print(f"  最高:     {summary['max_accuracy']:.2%}")
-    print(f"  最低:     {summary['min_accuracy']:.2%}")
-    print(f"  >50%:     {summary['stocks_above_50pct']}只")
-    print(f"  >55%:     {summary['stocks_above_55pct']}只")
-    print(f"  >60%:     {summary['stocks_above_60pct']}只")
-    print(f"\n  精度分布:")
-    for k, v in dist.items():
-        bar = "█" * v
-        pct_label = k.replace("_", "-").replace("below", "<").replace("plus", "+")
-        print(f"    {pct_label}: {v:3d} {bar}")
-    print(f"\n  📁 {out_path}")
+    print(f"\n📁 {out_path}")
+    print(json.dumps(output["universe_delta"], ensure_ascii=False, indent=2))
     return output, out_path
 
 
 if __name__ == "__main__":
-    output, out_path = main()
+    main()

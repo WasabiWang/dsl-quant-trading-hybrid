@@ -1299,6 +1299,9 @@ class PaperTrader:
                 "SELECT COUNT(*) as cnt FROM trade_history"
             ).fetchone()["cnt"]
             perf_rows = conn.execute("SELECT * FROM performance_metrics").fetchall()
+            # v4.7.6: 暴露峰值权益, 供真实高水位回撤计算 (原仅内部 _update_peak_equity 使用)
+            _peak_row = conn.execute(
+                "SELECT value FROM ledger WHERE key='peak_equity'").fetchone()
 
         perf = {}
         for r in perf_rows:
@@ -1330,6 +1333,7 @@ class PaperTrader:
             "positions_value": positions_value,
             "total_value": total_value,
             "total_return_pct": perf.get("total_return_pct", return_pct),
+            "peak_equity": float(_peak_row["value"]) if _peak_row else None,
             "win_rate": perf.get("win_rate", 0.0),
             "positions": filtered,
             "trade_count": trade_count,
