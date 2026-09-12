@@ -12,6 +12,8 @@ __pycache__/
 *.tmp
 *.temp
 test_*.py
+# 例外: tests/ 测试套件必须纳入版本控制 (L0/L1 测试金字塔)
+!tests/test_*.py
 temp_*
 demo_*
 
