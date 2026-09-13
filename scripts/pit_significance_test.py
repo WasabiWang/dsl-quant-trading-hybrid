@@ -96,6 +96,73 @@ def block_bootstrap_by_date(recs: list, n_boot: int = N_BOOT, block: int = BLOCK
             "ci95": (out[int(0.025 * len(out))], out[int(0.975 * len(out))])}
 
 
+def _acc_from_counts(idx_counts: list) -> float:
+    k = sum(idx_counts[i][0] for i in range(len(idx_counts)))
+    n = sum(idx_counts[i][1] for i in range(len(idx_counts)))
+    return k / n if n else float("nan")
+
+
+def block_bootstrap_multi(cnts: list, L: int, n_boot: int = N_BOOT,
+                          method: str = "randstart", seed: int = SEED) -> tuple:
+    """三种块抽样下的池化精度 95%CI。
+
+    cnts: [(k_t, n_t)] 按交易日排序
+    · randstart: 原实现（B=ceil(T/L) 个随机起点, 块尾部截短, 块可重叠/重复）
+    · circular : 标准循环块 bootstrap（起点随机, 每块固定取 L 日, 末尾回绕）
+    · moving   : 标准移动块 bootstrap（起点仅取能容纳整块的位置）
+    """
+    T = len(cnts)
+    if T == 0:
+        return (float("nan"), float("nan"), 0)
+    rng = random.Random(seed)
+    B = max(1, math.ceil(T / L))
+    out = []
+    for _ in range(n_boot):
+        k = n = 0
+        for _b in range(B):
+            if method == "randstart":
+                s = rng.randrange(T)
+                seg = range(s, min(s + L, T))
+            elif method == "circular":
+                s = rng.randrange(T)
+                seg = [(s + j) % T for j in range(L)]
+            else:  # moving
+                s = rng.randrange(T - L + 1) if T >= L else 0
+                seg = range(s, min(s + L, T))
+            for i in seg:
+                k += cnts[i][0]
+                n += cnts[i][1]
+        if n:
+            out.append(k / n)
+    out.sort()
+    return (out[int(0.025 * len(out))], out[int(0.975 * len(out))], B)
+
+
+def sensitivity_table(dump: dict, blocks: list, n_boot: int, min_preds: int) -> list:
+    """对两个样本口径 × 多块长 × 三种块法, 产出全表。"""
+    out = []
+    for label, keep in (("all", None), (f">={min_preds}", min_preds)):
+        codes = [c for c, v in dump.items() if keep is None or len(v) >= keep]
+        by_date = defaultdict(lambda: [0, 0])
+        for c in codes:
+            for d, ok in dump[c]:
+                by_date[d][0] += int(ok)
+                by_date[d][1] += 1
+        cnts = [tuple(by_date[d]) for d in sorted(by_date)]
+        tot_k = sum(x[0] for x in cnts)
+        tot_n = sum(x[1] for x in cnts)
+        for L in blocks:
+            row = {"sample": label, "stocks": len(codes), "days": len(cnts),
+                   "block": L, "acc": tot_k / tot_n}
+            for meth in ("randstart", "circular", "moving"):
+                lo, hi, B = block_bootstrap_multi(cnts, L, n_boot, meth)
+                row[f"{meth}_ci"] = (lo, hi)
+                row[f"{meth}_contains_50"] = lo <= 0.5 <= hi
+            row["blocks_per_draw"] = max(1, math.ceil(len(cnts) / L))
+            out.append(row)
+    return out
+
+
 def non_overlapping(recs_by_stock: dict, gap: int = HORIZON) -> dict:
     """每标的按 gap 个交易日间隔抽样 → 近似独立的样本 → 二项/Wilson。"""
     k = n = 0
@@ -122,6 +189,10 @@ def main() -> int:
     ap.add_argument("--universe", default="point_in_time")
     ap.add_argument("--min-preds", type=int, default=50)
     ap.add_argument("--json-out", default=None)
+    ap.add_argument("--sensitivity", action="store_true",
+                    help="块长×块法×样本口径 全表(需 --from-dump)")
+    ap.add_argument("--blocks", nargs="*", type=int, default=[5, 10, 20, 40, 60])
+    ap.add_argument("--n-boot", type=int, default=N_BOOT)
     args = ap.parse_args()
 
     res = {"generated_at": None, "universe": args.universe}
@@ -153,6 +224,7 @@ def main() -> int:
     if args.from_dump:
         dd = json.load(open(args.from_dump, encoding="utf-8"))
         per_stock = {c: [(r[0], bool(r[1])) for r in v] for c, v in dd["predictions"].items()}
+        per_stock_raw = dd["predictions"]
         allrecs = [r for v in per_stock.values() for r in v]
         bb = block_bootstrap_by_date(allrecs)
         no = non_overlapping(per_stock)
@@ -166,6 +238,21 @@ def main() -> int:
         print(f"    非重叠样本(gap={HORIZON}) n={no.get('n')} acc={no.get('acc'):.4f} "
               f"Wilson95=[{no['wilson95'][0]:.4f}, {no['wilson95'][1]:.4f}]")
         print(f"    非重叠下界 > 50%? {'是' if no['wilson95'][0] > 0.5 else '否'}")
+
+        if args.sensitivity:
+            rows = sensitivity_table(per_stock_raw, args.blocks, args.n_boot, args.min_preds)
+            res["modeB_sensitivity"] = rows
+            print()
+            print("=== 块长敏感性全表 ===")
+            print(f"{'样本':>5} {'块长':>4} {'抽块':>4} {'池化':>8} | {'randstart(原实现)':>23} | {'circular':>23} | {'moving':>23}")
+            for r in rows:
+                cells = []
+                for meth in ("randstart", "circular", "moving"):
+                    lo, hi = r[f"{meth}_ci"]
+                    cells.append(f"[{lo:.5f},{hi:.5f}]{'*' if r[f'{meth}_contains_50'] else ' '}")
+                print(f"{r['sample']:>5} {r['block']:>4} {r['blocks_per_draw']:>4} {r['acc']:>8.5f} | "
+                      f"{cells[0]:>23} | {cells[1]:>23} | {cells[2]:>23}")
+            print("(* = 该 CI 包含 50%)")
 
     if args.json_out:
         Path(args.json_out).parent.mkdir(parents=True, exist_ok=True)
