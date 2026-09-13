@@ -336,9 +336,20 @@ class TestCircuitBreakerState:
         from core.circuit_breaker import CircuitBreaker
         return CircuitBreaker()
 
-    def test_trading_allowed(self, cb):
+    def test_trading_allowed(self, cb, monkeypatch):
+        # 2026-09-13: is_trading_allowed() 会按墙钟在午休(11:30-13:00)返回 False,
+        # 原断言直接用真实时间 → 午休时段必然失败(时段性 flaky, 也会误拦 pre-push)。
+        # 本用例只验证"熔断器未被触发"这一逻辑, 时钟必须被固定。
+        monkeypatch.setattr("config.constants.is_lunch_break", lambda *a, **k: False)
         allowed, _ = cb.is_trading_allowed()
         assert allowed
+
+    def test_trading_blocked_during_lunch_break(self, cb, monkeypatch):
+        """午休时段必须拒单(与上面同一个门控, 反向锁定)。"""
+        monkeypatch.setattr("config.constants.is_lunch_break", lambda *a, **k: True)
+        allowed, reason = cb.is_trading_allowed()
+        assert not allowed
+        assert "午休" in reason
 
     def test_starting_capital(self, cb):
         cb.set_today_starting_capital(1_000_000)

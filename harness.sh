@@ -15,8 +15,17 @@ echo "🐍 Python: $PYTHON_BIN"
 
 run_test() {
     local name="$1"; shift
+    local target="$1"
     echo ""
-    PYTHONPATH="$(dirname "$0"):${PYTHONPATH:-}" "$PYTHON_BIN" "$@" 2>&1 | grep -v "error_handler\|feishu_alert\|INFO\|ERROR\|WARNING"
+    # 2026-09-13: pytest 风格的测试文件(无 `if __name__ == "__main__"` 入口)直接执行
+    # 等于 0 用例空跑 —— 仍 exit 0 并打印"全部测试通过"(假绿)。
+    # 这类文件必须交给 pytest 收集执行; 脚本式(有 __main__/argparse, 如 golden_test.py --strict)
+    # 与 audit 校验脚本保持直接执行不变。
+    if [ -f "$target" ] && [ "${target##*.}" = "py" ] && ! grep -q '__main__' "$target"; then
+        PYTHONPATH="$(dirname "$0"):${PYTHONPATH:-}" "$PYTHON_BIN" -m pytest "$@" -q 2>&1 | grep -v "error_handler\|feishu_alert\|INFO\|ERROR\|WARNING"
+    else
+        PYTHONPATH="$(dirname "$0"):${PYTHONPATH:-}" "$PYTHON_BIN" "$@" 2>&1 | grep -v "error_handler\|feishu_alert\|INFO\|ERROR\|WARNING"
+    fi
     local rc=${PIPESTATUS[0]}
     if [ $rc -ne 0 ]; then
         echo "  ❌ $name FAILED (exit=$rc)"
