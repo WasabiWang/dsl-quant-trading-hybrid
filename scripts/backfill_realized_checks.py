@@ -15,6 +15,10 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(PROJECT_ROOT)
 sys.path.insert(0, PROJECT_ROOT)
 
+# P1(对齐 rank_ic_monitor): symbol 规范化统一出口, 避免收集端/回填端口径分叉
+# (daily_records 里 symbol 可能是 int 或带空格字符串, 直接查表会静默漏掉)
+from scripts.rank_ic_monitor import normalize_symbol  # noqa: E402
+
 CALIB_PATH = os.path.join(PROJECT_ROOT, "confidence_data", "prediction_calibration.json")
 
 
@@ -86,7 +90,10 @@ def main():
                 continue
             if "predicted_return" not in s:
                 continue
-            pending.append((dr["date"], s.get("symbol", ""), s.get("horizon", "5d")))
+            sym = normalize_symbol(s.get("symbol"))
+            if not sym:
+                continue
+            pending.append((dr["date"], sym, s.get("horizon", "5d")))
 
     symbols = sorted({s for _, s, _ in pending if s})
     print(f"待回填: {len(pending)} 条预测 × {len(symbols)} 只标的")
@@ -122,8 +129,8 @@ def main():
                 continue
             if "predicted_return" not in s:
                 continue
-            sym = s.get("symbol", "")
-            km = kline_maps.get(sym)
+            sym = normalize_symbol(s.get("symbol"))
+            km = kline_maps.get(sym) if sym else None
             if not km or dr["date"] not in km:
                 continue
             horizon = s.get("horizon", "5d")
@@ -136,6 +143,10 @@ def main():
             if len(sorted_days) <= hd:
                 continue
             target_day = sorted_days[hd]
+            # P1(对齐 rank_ic_monitor.fill_realized): 兑现日取自全票交易日并集,
+            # 该标的可能当日停牌/缓存不全 → 直接跳过, 不得 KeyError 中断整批回填
+            if target_day not in km:
+                continue
             pred_close = km[dr["date"]]
             future_close = km[target_day]
             actual = (future_close - pred_close) / pred_close
@@ -183,7 +194,7 @@ def main():
         agg = {}
         for dr in daily_records:
             for s in dr.get("stocks", []):
-                sym = str(s.get("symbol", "")).zfill(6)
+                sym = normalize_symbol(s.get("symbol"))
                 if not sym or not s.get("realized_checked", False):
                     continue
                 a = agg.setdefault(sym, {"c": 0, "t": 0, "h": 0})
