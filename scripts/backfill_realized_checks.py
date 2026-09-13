@@ -142,7 +142,9 @@ def main():
             pred_ret = s.get("predicted_return", 0)
             pred_dir = 1 if pred_ret > 0 else (-1 if pred_ret < 0 else 0)
             act_dir = 1 if actual > 0 else (-1 if actual < 0 else 0)
-            s["realized_return"] = round(actual, 4)
+            # P2(对齐 rank_ic_monitor.fill_realized): 保留全精度, 避免 round(4)
+            # 把接近的实际收益人为并列, 改变下游 Spearman 排名。展示层自行格式化。
+            s["realized_return"] = actual
             s["realized_correct"] = (pred_dir == act_dir)
             s["realized_checked"] = True
             day_modified = True

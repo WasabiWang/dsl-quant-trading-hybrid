@@ -718,6 +718,73 @@ class TestCalibrationData:
         assert "last_date" in stats
 
 
+class TestRealizedReturnFullPrecision:
+    """L0.x: realized_return 三个写入点口径一致 — 全部保留全精度。
+
+    P2: round(actual, 4) 会把接近的实际收益人为并列, 改变下游 Spearman 排名
+    (rank_ic_monitor.fill_realized 已修)。写入点幂等(realized_checked/realized_return
+    为真即跳过), 谁先写谁生效 → 三个写入点必须同精度。
+    """
+
+    ACTUAL = 0.0123456789012  # 4 位裁剪后会失真
+
+    def test_calibration_feedback_keeps_full_precision(self, monkeypatch, tmp_path):
+        import core.calibration_feedback as cfm
+
+        calib = tmp_path / "prediction_calibration.json"
+        pred_date = (date.today() - timedelta(days=3)).strftime("%Y-%m-%d")
+        calib.write_text(json.dumps({
+            "stock_accuracy": {},
+            "daily_records": [{
+                "date": pred_date,
+                "stocks": [{"symbol": "000001", "name": "T", "signal": "buy",
+                            "predicted_return": 0.01, "horizon": "1d"}],
+            }],
+        }, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(cfm, "PRED_CALIBRATION", calib)
+
+        engine = cfm.CalibrationFeedback()
+        monkeypatch.setattr(engine, "_is_trading_day", lambda d: True)
+        monkeypatch.setattr(engine, "_fetch_actual_return", lambda *a, **k: self.ACTUAL)
+
+        result = engine.check_realized_accuracy(max_days=7)
+        assert result["checked"] == 1
+        assert result["total"] == 1
+        written = json.loads(calib.read_text(encoding="utf-8"))
+        s = written["daily_records"][0]["stocks"][0]
+        assert s["realized_checked"] is True
+        assert s["realized_return"] == self.ACTUAL                # 未 round(4)
+        assert round(s["realized_return"], 4) != s["realized_return"]
+
+    def test_backfill_realized_checks_keeps_full_precision(self, monkeypatch, tmp_path):
+        import scripts.backfill_realized_checks as brc
+
+        calib = tmp_path / "prediction_calibration.json"
+        days = [(date.today() - timedelta(days=d)).strftime("%Y-%m-%d")
+                for d in (10, 9, 8, 7, 6, 5)]
+        calib.write_text(json.dumps({
+            "stock_accuracy": {},
+            "daily_records": [{
+                "date": days[0],
+                "stocks": [{"symbol": "000001", "name": "T", "signal": "buy",
+                            "predicted_return": 0.01, "horizon": "5d"}],
+            }],
+        }, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(brc, "CALIB_PATH", str(calib))
+        monkeypatch.setattr(sys, "argv", ["backfill_realized_checks.py"])
+
+        kline = {days[0]: 3.0, days[1]: 3.01, days[2]: 3.02,
+                 days[3]: 3.03, days[4]: 3.04, days[5]: 3.1}
+        monkeypatch.setattr(brc, "load_kline_map", lambda sym: dict(kline))
+
+        brc.main()
+        s = json.loads(calib.read_text(encoding="utf-8"))["daily_records"][0]["stocks"][0]
+        actual = (3.1 - 3.0) / 3.0
+        assert s["realized_checked"] is True
+        assert abs(s["realized_return"] - actual) < 1e-15         # 未 round(4)
+        assert round(s["realized_return"], 4) != s["realized_return"]
+
+
 class TestCircuitBreaker:
     """L0.5: Circuit breaker — data file integrity."""
 

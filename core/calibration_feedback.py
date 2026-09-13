@@ -429,7 +429,10 @@ class CalibrationFeedback:
                 actual_direction = 1 if actual_return > 0 else (-1 if actual_return < 0 else 0)
                 correct = (predicted_direction == actual_direction)
                 
-                daily_records[di]["stocks"][si]["realized_return"] = round(actual_return, 4)
+                # P2(对齐 rank_ic_monitor.fill_realized): 保留全精度写入, 避免 round(4)
+                # 制造伪并列改变下游 Spearman 排名; 精度只在展示层裁剪(下方日志 %.2f)。
+                # 只改精度, 不改方向判定/realized_correct/阈值 → 校准闭环语义不变。
+                daily_records[di]["stocks"][si]["realized_return"] = actual_return
                 daily_records[di]["stocks"][si]["realized_correct"] = correct
                 daily_records[di]["stocks"][si]["realized_checked"] = True
                 modified = True
