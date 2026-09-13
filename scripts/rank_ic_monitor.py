@@ -148,19 +148,30 @@ def get_kline_map(symbol: str, force: bool = False):
 
 
 # ── 标的集合 ───────────────────────────────────────────────────────────────
+def normalize_symbol(sym) -> str:
+    """统一 symbol 规范化出口: 6 位零填充字符串; 无效返回 None。
+    P2: 避免收集端(zfill)与回填端(原始值)口径不一致导致静默跳过。"""
+    if sym is None:
+        return None
+    s = str(sym).strip()
+    return s.zfill(6) if s else None
+
+
 def collect_symbols(cal: dict) -> list:
     """主池 + 观察池 + 影子池 + daily_records 中出现过的所有 symbol。"""
     syms = set()
     for dr in cal.get("daily_records", []):
         for s in dr.get("stocks", []):
-            sym = s.get("symbol")
+            sym = normalize_symbol(s.get("symbol"))
             if sym:
-                syms.add(str(sym).zfill(6))
+                syms.add(sym)
     # 当前主池
     try:
         from scripts.batch_predict import get_stock_pool
         for code, _name in get_stock_pool():
-            syms.add(str(code).zfill(6))
+            sym = normalize_symbol(code)
+            if sym:
+                syms.add(sym)
     except Exception:
         pass
     # 观察池 / 影子池
@@ -177,8 +188,9 @@ def collect_symbols(cal: dict) -> list:
                     c = item.get("code") or item.get("symbol")
                 else:
                     c = item
-                if c:
-                    syms.add(str(c).zfill(6))
+                sym = normalize_symbol(c)
+                if sym:
+                    syms.add(sym)
         except Exception:
             pass
     return sorted(syms)
@@ -205,8 +217,8 @@ def fill_realized(cal: dict, kline_maps: dict, trading_days: set, dry_run: bool)
                 hd = int("".join(c for c in str(horizon) if c.isdigit())) or 5
             except Exception:
                 hd = 5
-            sym = s.get("symbol")
-            km = kline_maps.get(sym)
+            sym = normalize_symbol(s.get("symbol"))
+            km = kline_maps.get(sym) if sym else None
             if not km or dr["date"] not in km:
                 continue
             # 第 hd 个交易日后收盘
@@ -222,7 +234,8 @@ def fill_realized(cal: dict, kline_maps: dict, trading_days: set, dry_run: bool)
             pred_close = km[dr["date"]]
             future_close = km[target_day]
             actual = (future_close - pred_close) / pred_close
-            s["realized_return"] = round(actual, 4)
+            # P2: 保留全精度, 避免 round(4) 人为并列改变 Spearman 排名
+            s["realized_return"] = actual
             s["realized_check_date"] = target_day
             filled += 1
     if not dry_run:

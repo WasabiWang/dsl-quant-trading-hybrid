@@ -151,6 +151,32 @@ def test_compute_ic_series_exposes_low_coverage_anomaly():
     assert rim.compute_quality_summary(series, th)["quality_status"] == "data_issue"
 
 
+def test_normalize_symbol():
+    assert rim.normalize_symbol(2) == "000002"
+    assert rim.normalize_symbol("600519") == "600519"
+    assert rim.normalize_symbol(" 000001 ") == "000001"
+    assert rim.normalize_symbol(None) is None
+    assert rim.normalize_symbol("") is None
+
+
+def test_fill_realized_normalizes_symbol_and_keeps_full_precision():
+    """P2: symbol 规范化口径一致(整数 2 → '000002' 命中); realized_return 保留全精度。"""
+    cal = {"daily_records": [{
+        "date": "2026-01-10",
+        "stocks": [{"symbol": 2, "predicted_return": 0.01, "horizon": "5d"}],
+    }]}
+    km = {"2026-01-10": 3.0, "2026-01-12": 3.02, "2026-01-13": 3.04,
+          "2026-01-14": 3.06, "2026-01-15": 3.08, "2026-01-16": 3.1}
+    kline_maps = {"000002": km}
+    trading_days = set(km)
+    filled = rim.fill_realized(cal, kline_maps, trading_days, dry_run=True)
+    s = cal["daily_records"][0]["stocks"][0]
+    assert filled == 1                                   # 整数 symbol 也能命中
+    actual = (3.1 - 3.0) / 3.0
+    assert abs(s["realized_return"] - actual) < 1e-15    # 未 round(4)
+    assert round(s["realized_return"], 4) != s["realized_return"]
+
+
 def test_fill_realized_skips_missing_target_day():
     """P1: 兑现日不在该标的K线中时跳过, 不得 KeyError 中断整批回填。"""
     cal = {"daily_records": [{
