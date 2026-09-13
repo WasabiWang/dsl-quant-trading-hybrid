@@ -14,7 +14,7 @@ DSL H20D Walk-Forward OOS Direction Accuracy (评估路径 · 阶段1时点一�
 - 对每个窗口的测试期，每天用模型预测未来20日收益方向
 - 跨窗口汇总每只股票的 OOS direction_accuracy
 """
-import os, sys, json, yaml, gc, time, argparse
+import os, sys, json, yaml, gc, time, argparse, threading
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 import numpy as np
@@ -47,6 +47,9 @@ MAX_WORKERS = 3           # 并行线程数
 # ====== FX-1b (阶段1-B 步骤4): 规则化时点宇宙 ======
 PIT_PATH = os.path.join(PROJECT_ROOT, "data", "universe_pit.json")
 PIT_MEMBERSHIP = None     # {code: [(start,end),...]}; point_in_time 模式下启用
+# 显著性检验用: 逐笔预测落盘 (--dump-predictions 时启用)
+PRED_DUMP = None          # {code: [[date, correct01], ...]}
+PRED_LOCK = threading.Lock()
 # ================================
 
 # ====== FX-1: 池成分时间线 (从可得快照重建) ======
@@ -250,7 +253,13 @@ def evaluate_stock(code: str, name: str, backtest_days: int, adjust: str, drop_f
                     X_test_sel = selector.transform(X_test)
                     pred = float(model.predict(X_test_sel)[0])
                     actual = float(row[tcol])
-                    all_predictions.append((1 if pred > 0 else -1, 1 if actual > 0 else -1))
+                    pdir = 1 if pred > 0 else -1
+                    adir = 1 if actual > 0 else -1
+                    all_predictions.append((pdir, adir))
+                    if PRED_DUMP is not None:
+                        with PRED_LOCK:
+                            PRED_DUMP.setdefault(code, []).append(
+                                [str(test_idx)[:10], 1 if pdir == adir else 0])
             except Exception:
                 continue
 
@@ -330,6 +339,8 @@ def main():
     parser.add_argument("--backtest-days", type=int, default=730, help="回测天数(默认730)")
     parser.add_argument("--pit-file", default=None,
                         help="时点宇宙 JSON (默认 data/universe_pit.json)")
+    parser.add_argument("--dump-predictions", default=None,
+                        help="将逐笔预测(date, correct)落盘供显著性检验使用")
     args = parser.parse_args()
 
     drop_fund = (args.fund == "drop")
@@ -338,9 +349,11 @@ def main():
     snapshot_symbols, snap_meta = resolve_universe("snapshot")
     pit_symbols, pit_meta = resolve_universe("point_in_time", backtest_days, args.pit_file)
     if args.universe in ("point_in_time", "both"):
-        global PIT_MEMBERSHIP
+        global PIT_MEMBERSHIP, PRED_DUMP
         PIT_MEMBERSHIP, _ = build_pit_intervals(
             load_pit_universe(args.pit_file), pit_meta["window_start"])
+        if args.dump_predictions:
+            PRED_DUMP = {}
         print(f"   时点隶属区间: {len(PIT_MEMBERSHIP)} 只 (窗口起点 {pit_meta['window_start']})")
 
     names = {}
@@ -407,6 +420,14 @@ def main():
 
     print(f"\n📁 {out_path}")
     print(json.dumps(output["universe_delta"], ensure_ascii=False, indent=2))
+
+    if args.dump_predictions and PRED_DUMP is not None:
+        with open(args.dump_predictions, "w", encoding="utf-8") as f:
+            json.dump({"universe": args.universe, "horizon": HORIZON,
+                       "window_days": WINDOW_DAYS, "backtest_days": backtest_days,
+                       "predictions": PRED_DUMP}, f, ensure_ascii=False)
+        print(f"🧾 逐笔预测: {args.dump_predictions} "
+              f"({sum(len(v) for v in PRED_DUMP.values())} 条 / {len(PRED_DUMP)} 只)")
     return output, out_path
 
 
