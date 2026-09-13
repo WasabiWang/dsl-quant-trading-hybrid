@@ -50,6 +50,49 @@ PIT_MEMBERSHIP = None     # {code: [(start,end),...]}; point_in_time 模式下�
 # 显著性检验用: 逐笔预测落盘 (--dump-predictions 时启用)
 PRED_DUMP = None          # {code: [[date, correct01], ...]}
 PRED_LOCK = threading.Lock()
+
+# ====== 行情取数源: 麦蕊拿不到退市股 ⇒ 回落到本地 PIT 缓存 ======
+KLINES_DIR = os.path.join(PROJECT_ROOT, "data", "universe_klines")
+KLINE_SOURCE = "auto"     # mairui | local | auto(默认: 麦蕊优先, 不足则用本地)
+KLINE_SKIP_ADJUST_MISMATCH = False   # True = 跳过与 --adjust 口径不符的本地文件
+
+
+def load_kline_local(code: str, start: str, end: str):
+    """从 PIT 行情缓存 data/universe_klines/{code}.parquet 读 K 线(含退市股)。
+    列结构与 get_kline_adjusted 一致, 可直接替换。"""
+    p = os.path.join(KLINES_DIR, f"{code}.parquet")
+    if not os.path.exists(p):
+        return None
+    try:
+        df = pd.read_parquet(p)
+    except Exception:
+        return None
+    if df is None or len(df) == 0 or "date" not in df.columns:
+        return None
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df[(df["date"] >= pd.Timestamp(start)) & (df["date"] <= pd.Timestamp(end))]
+    return df.reset_index(drop=True) if len(df) else None
+
+
+def _load_kline(code: str, start: str, end: str, adjust: str):
+    """返回 (kdf, source_tag)。麦蕊不足 350 行 → 回落本地 PIT 缓存。"""
+    if KLINE_SOURCE in ("mairui", "auto"):
+        try:
+            k = get_kline_adjusted(code, start, end, adjust=adjust)
+            if k is not None and len(k) >= 350:
+                return k, "mairui"
+        except Exception:
+            pass
+        if KLINE_SOURCE == "mairui":
+            return None, "mairui"
+    k = load_kline_local(code, start, end)
+    if k is None or len(k) < 350:
+        return None, "local"
+    tag = str(k["adjust"].iloc[0]) if "adjust" in k.columns else "unknown"
+    if KLINE_SKIP_ADJUST_MISMATCH and adjust == "hfq" and tag.startswith("raw"):
+        return None, f"local:{tag}(skip:mismatch)"
+    return k, f"local:{tag}"
 # ================================
 
 # ====== FX-1: 池成分时间线 (从可得快照重建) ======
@@ -169,7 +212,9 @@ def evaluate_stock(code: str, name: str, backtest_days: int, adjust: str, drop_f
         start_date = (datetime.now() - timedelta(days=int(backtest_days * 2.2))).strftime("%Y-%m-%d")
 
         # FX-2: 统一复权入口 (新默认 hfq; --adjust qfq 复现旧行为)
-        kdf = get_kline_adjusted(code, start_date, end_date, adjust=adjust)
+        # 2026-09-13: 麦蕊结构性无退市股(返回 0 行) ⇒ 不足 350 行时回落本地 PIT 缓存,
+        #   否则时点宇宙里的退市股永远进不了回测(幸存者偏差消不掉)。
+        kdf, ksrc = _load_kline(code, start_date, end_date, adjust)
         if kdf is None or len(kdf) < 350:
             return None
 
@@ -200,7 +245,9 @@ def evaluate_stock(code: str, name: str, backtest_days: int, adjust: str, drop_f
         if len(all_idx) < MIN_TRAIN_SAMPLES + WINDOW_DAYS:
             return None
 
-        bt_start = len(all_idx) - backtest_days
+        # 2026-09-13 修复: 行数少于 backtest_days 时 bt_start 会变负 → all_idx[-9:] 静默变成
+        # “最后 9 行”, 测试窗口被压成几天(退市股/次新股必踩)。必须钳到 0。
+        bt_start = max(0, len(all_idx) - backtest_days)
         bt_indices = all_idx[bt_start:]
 
         all_predictions = []
@@ -282,6 +329,7 @@ def evaluate_stock(code: str, name: str, backtest_days: int, adjust: str, drop_f
             "wrong": total - correct,
             "true_positive_rate": round(tpr, 4),
             "true_negative_rate": round(tnr, 4),
+            "kline_source": ksrc,
         }
     except Exception:
         return None
@@ -341,7 +389,15 @@ def main():
                         help="时点宇宙 JSON (默认 data/universe_pit.json)")
     parser.add_argument("--dump-predictions", default=None,
                         help="将逐笔预测(date, correct)落盘供显著性检验使用")
+    parser.add_argument("--kline-source", choices=["mairui", "local", "auto"], default="auto",
+                        help="auto=麦蕊优先不足回落本地PIT缓存(含退市股); local=只用本地; mairui=旧行为")
+    parser.add_argument("--skip-adjust-mismatch", action="store_true",
+                        help="跳过与 --adjust 口径不符的本地文件")
     args = parser.parse_args()
+
+    global KLINE_SOURCE, KLINE_SKIP_ADJUST_MISMATCH
+    KLINE_SOURCE = args.kline_source
+    KLINE_SKIP_ADJUST_MISMATCH = args.skip_adjust_mismatch
 
     drop_fund = (args.fund == "drop")
     backtest_days = args.backtest_days
