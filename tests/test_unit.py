@@ -785,6 +785,157 @@ class TestRealizedReturnFullPrecision:
         assert round(s["realized_return"], 4) != s["realized_return"]
 
 
+class TestMairuiActualReturnFallback:
+    """L0.x: _fetch_actual_return 麦蕊主源列映射 + 真降级链 (v4.7.6)。
+
+    缺陷: 麦蕊 get_kline_history 返回列 t/o/h/l/c/v/a/pc/sf, 未映射为
+    _calc_return_from_df 期望的 close → KeyError 被内层 except 吞掉 → 恒返回
+    None; 且主源分支为 `return`(非抛错), akshare 降级永不触发
+    → check_realized_accuracy 空跑, 校准闭环兑现阶段形同虚设。
+    """
+
+    @staticmethod
+    def _mairui_rows(dates, closes):
+        """构造麦蕊原始列格式行 (t,o,h,l,c,v,a,pc,sf)"""
+        return [{"t": d, "o": c, "h": c, "l": c, "c": c,
+                 "v": 1, "a": 1, "pc": c, "sf": 0}
+                for d, c in zip(dates, closes)]
+
+    def test_mairui_rows_are_mapped_and_used(self, monkeypatch):
+        """麦蕊格式行必须能算出收益, 且不碰降级源。"""
+        import core.calibration_feedback as cfm
+
+        rows = self._mairui_rows(
+            ["2026-09-01", "2026-09-02", "2026-09-03"],
+            [10.0, 11.0, 12.0])
+        monkeypatch.setattr("config.mairui_api_config.get_kline_history",
+                            lambda *a, **k: rows)
+
+        def _no_akshare(**_kwargs):
+            raise AssertionError("主源成功时不应触发 akshare 降级")
+        monkeypatch.setattr("akshare.stock_zh_a_hist", _no_akshare)
+
+        eng = cfm.CalibrationFeedback()
+        ret = eng._fetch_actual_return("600519", date(2026, 9, 1), 1)
+        assert ret is not None
+        assert abs(ret - 0.1) < 1e-12            # (11-10)/10
+
+    def test_mairui_empty_falls_back_to_akshare(self, monkeypatch):
+        """麦蕊返回空 → 必须真降级到 akshare, 而非静默 None。"""
+        import core.calibration_feedback as cfm
+
+        monkeypatch.setattr("config.mairui_api_config.get_kline_history",
+                            lambda *a, **k: [])
+        ak_df = pd.DataFrame({"日期": ["2026-09-01", "2026-09-02"],
+                              "收盘": [10.0, 12.5]})
+        calls = {"n": 0}
+
+        def _fake_akshare(**_kwargs):
+            calls["n"] += 1
+            return ak_df
+        monkeypatch.setattr("akshare.stock_zh_a_hist", _fake_akshare)
+
+        eng = cfm.CalibrationFeedback()
+        ret = eng._fetch_actual_return("600519", date(2026, 9, 1), 1)
+        assert calls["n"] == 1                    # 降级链被真正触发
+        assert ret is not None and abs(ret - 0.25) < 1e-12
+
+    def test_mairui_exception_falls_back_to_akshare(self, monkeypatch):
+        """麦蕊抛异常 → 降级 (旧缺陷会在此静默 None)。"""
+        import core.calibration_feedback as cfm
+
+        def _boom(*a, **k):
+            raise RuntimeError("mairui down")
+        monkeypatch.setattr("config.mairui_api_config.get_kline_history", _boom)
+        ak_df = pd.DataFrame({"日期": ["2026-09-01", "2026-09-02"],
+                              "收盘": [10.0, 12.5]})
+        calls = {"n": 0}
+
+        def _fake_akshare(**_kwargs):
+            calls["n"] += 1
+            return ak_df
+        monkeypatch.setattr("akshare.stock_zh_a_hist", _fake_akshare)
+
+        eng = cfm.CalibrationFeedback()
+        ret = eng._fetch_actual_return("600519", date(2026, 9, 1), 1)
+        assert calls["n"] == 1
+        assert ret is not None and abs(ret - 0.25) < 1e-12
+
+    def test_mairui_no_valid_window_falls_back(self, monkeypatch):
+        """拿到麦蕊K线但窗口内算不出收益 → 仍回落降级源。"""
+        import core.calibration_feedback as cfm
+
+        rows = self._mairui_rows(["2026-09-02", "2026-09-03"], [10.0, 11.0])
+        monkeypatch.setattr("config.mairui_api_config.get_kline_history",
+                            lambda *a, **k: rows)
+        ak_df = pd.DataFrame({"日期": ["2026-09-01", "2026-09-02"],
+                              "收盘": [10.0, 12.5]})
+        calls = {"n": 0}
+
+        def _fake_akshare(**_kwargs):
+            calls["n"] += 1
+            return ak_df
+        monkeypatch.setattr("akshare.stock_zh_a_hist", _fake_akshare)
+
+        eng = cfm.CalibrationFeedback()
+        # pred_date 早于所有麦蕊行 → 主源窗口外 → 回落
+        ret = eng._fetch_actual_return("600519", date(2026, 9, 1), 1)
+        assert calls["n"] == 1
+        assert ret is not None and abs(ret - 0.25) < 1e-12
+
+    def test_calc_return_accepts_c_alias(self):
+        """_calc_return_from_df 兼容 c 列名(麦蕊/防御)。"""
+        import core.calibration_feedback as cfm
+
+        df = pd.DataFrame({"date": [date(2026, 9, 1), date(2026, 9, 2)],
+                           "c": [10.0, 12.0]})
+        eng = cfm.CalibrationFeedback()
+        ret = eng._calc_return_from_df(df, date(2026, 9, 1), 1)
+        assert abs(ret - 0.2) < 1e-12
+
+    def test_calc_return_missing_close_column_returns_none(self):
+        """无任何可识别收盘列 → None(而非 KeyError 外溢)。"""
+        import core.calibration_feedback as cfm
+
+        df = pd.DataFrame({"date": [date(2026, 9, 1), date(2026, 9, 2)],
+                           "px": [10.0, 12.0]})
+        eng = cfm.CalibrationFeedback()
+        assert eng._calc_return_from_df(df, date(2026, 9, 1), 1) is None
+
+    def test_check_realized_accuracy_consumes_mairui_full_precision(
+            self, monkeypatch, tmp_path):
+        """闭环回归: 麦蕊真实走向下 pending 行被兑现, 且写入全精度。"""
+        import core.calibration_feedback as cfm
+
+        calib = tmp_path / "prediction_calibration.json"
+        pred_date = (date.today() - timedelta(days=3)).strftime("%Y-%m-%d")
+        nxt = (date.today() - timedelta(days=2)).strftime("%Y-%m-%d")
+        calib.write_text(json.dumps({
+            "stock_accuracy": {},
+            "daily_records": [{
+                "date": pred_date,
+                "stocks": [{"symbol": "600519", "name": "T", "signal": "buy",
+                            "predicted_return": 0.01, "horizon": "1d"}],
+            }],
+        }, ensure_ascii=False), encoding="utf-8")
+        monkeypatch.setattr(cfm, "PRED_CALIBRATION", calib)
+
+        c1, c2 = 10.0, 11.000123456789
+        monkeypatch.setattr(
+            "config.mairui_api_config.get_kline_history",
+            lambda *a, **k: self._mairui_rows([pred_date, nxt], [c1, c2]))
+
+        eng = cfm.CalibrationFeedback()
+        monkeypatch.setattr(eng, "_is_trading_day", lambda d: True)
+        res = eng.check_realized_accuracy(max_days=7)
+
+        assert res["checked"] == 1 and res["total"] == 1
+        s = json.loads(calib.read_text(encoding="utf-8"))["daily_records"][0]["stocks"][0]
+        assert s["realized_checked"] is True
+        assert s["realized_return"] == (c2 - c1) / c1     # 全精度, 未 round(4)
+        assert round(s["realized_return"], 4) != s["realized_return"]
+
+
 class TestCircuitBreaker:
     """L0.5: Circuit breaker — data file integrity."""
 

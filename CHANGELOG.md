@@ -1,3 +1,28 @@
+# v4.7.6 (2026-09-13) — 校准闭环兑现修复（麦蕊列映射 + 真降级链）
+
+审计遗留 §4 阻断性缺陷：`core/calibration_feedback.py::_fetch_actual_return` 麦蕊主源**恒返回 None**。
+
+## 🔴 根因 1: 麦蕊列名未映射
+- 麦蕊 `get_kline_history` 返回列为 `t,o,h,l,c,v,a,pc,sf`，原实现直接交给只认
+  `close`/`收盘` 的 `_calc_return_from_df` → `KeyError` 被内层 `except` 吞掉 → 恒 `None`
+- 修复: `rename(columns=MAIRUI_KLINE_COLUMNS)`（`c→close`、`t→date_raw`→`date`）
+- `_calc_return_from_df` 侧同步按 `CLOSE_COLUMN_CANDIDATES=(close,收盘,c)` 解析，不再假设列名
+
+## 🔴 根因 2: 主源失败切断降级链
+- 主源分支是 `return`（非抛错）→ 即使列名修好，返回 `None` 时 akshare 降级分支永不触达
+- 修复: 仅当 `_calc_return_from_df` 返回非 `None` 才 `return`；异常/空数据/窗口外一律继续降级链
+
+## ✅ 验证
+- 新增 `tests/test_unit.py::TestMairuiActualReturnFallback`（7 用例）：麦蕊行→算出收益、
+  空/异常/窗口外→真降级、`c` 别名、缺失收盘列→None、`check_realized_accuracy` 全精度写入
+- `harness.sh l0` / `l1` 全通过；L2/L3/Property 失败项与基线逐项一致（均为 worktree 缺本地
+  数据/配置，非本改动引入）
+- 端到端（真实麦蕊 K 线，只写 `/tmp` 副本）：pending 兑现行 **0 → 12**，全部 17–18 位全精度、
+  0 条 4 位残留；幂等复跑新增 0；生产 JSON sha256 前后一致（零副作用）
+- 语义边界：不动方向判定/阈值/`realized_checked` 语义/`correct_predictions` 聚合
+
+---
+
 # v4.7.3.1 (2026-08-31) — Transformer 分支双 bug 修复
 
 训练时 Transformer 一直被静默跳过 + 预测侧特征未定义，两个 NameError 同一链路。
