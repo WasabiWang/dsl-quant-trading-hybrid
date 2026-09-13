@@ -306,7 +306,8 @@ def evaluate_stock(code: str, name: str, backtest_days: int, adjust: str, drop_f
                     if PRED_DUMP is not None:
                         with PRED_LOCK:
                             PRED_DUMP.setdefault(code, []).append(
-                                [str(test_idx)[:10], 1 if pdir == adir else 0])
+                                [str(test_idx)[:10], 1 if pdir == adir else 0,
+                                 round(pred, 6), round(actual, 6)])
             except Exception:
                 continue
 
@@ -388,7 +389,7 @@ def main():
     parser.add_argument("--pit-file", default=None,
                         help="时点宇宙 JSON (默认 data/universe_pit.json)")
     parser.add_argument("--dump-predictions", default=None,
-                        help="将逐笔预测(date, correct)落盘供显著性检验使用")
+                        help="将逐笔预测 [date, correct, pred, actual] 落盘供显著性/校准检验使用")
     parser.add_argument("--kline-source", choices=["mairui", "local", "auto"], default="auto",
                         help="auto=麦蕊优先不足回落本地PIT缓存(含退市股); local=只用本地; mairui=旧行为")
     parser.add_argument("--skip-adjust-mismatch", action="store_true",
