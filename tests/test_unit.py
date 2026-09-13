@@ -934,6 +934,85 @@ class TestMairuiActualReturnFallback:
         assert s["realized_checked"] is True
         assert s["realized_return"] == (c2 - c1) / c1     # 全精度, 未 round(4)
         assert round(s["realized_return"], 4) != s["realized_return"]
+class TestBackfillRealizedChecksGuards:
+    """L0.x: backfill_realized_checks 与 rank_ic_monitor.fill_realized 同口径。
+
+    P1: 兑现日取自全票交易日并集, 单标的可能当日停牌/缓存不全 → 必须跳过该条,
+    不得 KeyError 中断整批回填 (同 rank_ic_monitor b2960ca 修复)。
+    P1: symbol 统一走 normalize_symbol, 避免 int/未补零字符串 与 '000002' 口径分叉。
+    """
+
+    @staticmethod
+    def _days(*offsets):
+        return [(date.today() - timedelta(days=d)).strftime("%Y-%m-%d") for d in offsets]
+
+    @staticmethod
+    def _write_calib(tmp_path, days, stocks):
+        calib = tmp_path / "prediction_calibration.json"
+        calib.write_text(json.dumps({
+            "stock_accuracy": {},
+            "daily_records": [{"date": days[0], "stocks": stocks}],
+        }, ensure_ascii=False), encoding="utf-8")
+        return calib
+
+    def test_backfill_realized_checks_skips_missing_target_day(self, monkeypatch, tmp_path):
+        """兑现日不在该标的K线中(停牌) → 跳过该条且不中断整批回填。"""
+        import scripts.backfill_realized_checks as brc
+
+        days = self._days(10, 9, 8, 7, 6, 5)
+        base = {"name": "T", "signal": "buy", "predicted_return": 0.01, "horizon": "5d"}
+        calib = self._write_calib(tmp_path, days, [
+            dict(base, symbol="000001"),   # 自 days[4] 起停牌: 兑现日 days[5] 无K线
+            dict(base, symbol="000002"),   # 正常交易, 把 days[5] 带进交易日并集
+        ])
+        monkeypatch.setattr(brc, "CALIB_PATH", str(calib))
+        monkeypatch.setattr(brc, "TRADING_DAYS", set())   # 隔离全局交易日并集
+        monkeypatch.setattr(sys, "argv", ["backfill_realized_checks.py"])
+
+        maps = {
+            "000001": {days[i]: 10.0 + i for i in range(5)},   # days[0]..days[4]
+            "000002": {days[i]: 20.0 + i for i in range(6)},   # days[0]..days[5]
+        }
+        monkeypatch.setattr(brc, "load_kline_map", lambda sym: dict(maps[sym]))
+
+        brc.main()   # 修复前: km[days[5]] → KeyError, 整批回填中断
+
+        halted, normal = json.loads(calib.read_text(encoding="utf-8"))["daily_records"][0]["stocks"]
+        assert halted.get("realized_checked", False) is False  # 缺价 → 不写入, 留待下轮
+        assert "realized_return" not in halted
+        assert normal["realized_checked"] is True            # 整批未被中断
+        assert abs(normal["realized_return"] - (25.0 - 20.0) / 20.0) < 1e-15
+
+    def test_backfill_realized_checks_normalizes_symbol(self, monkeypatch, tmp_path):
+        """int 2 与 '000002' 是同一标的: 只拉一次K线, 两条记录都正确回填。"""
+        import scripts.backfill_realized_checks as brc
+
+        days = self._days(10, 9, 8, 7, 6, 5)
+        base = {"name": "T", "signal": "buy", "predicted_return": 0.01, "horizon": "5d"}
+        calib = self._write_calib(tmp_path, days, [
+            dict(base, symbol=2),
+            dict(base, symbol="000002"),
+        ])
+        monkeypatch.setattr(brc, "CALIB_PATH", str(calib))
+        monkeypatch.setattr(brc, "TRADING_DAYS", set())
+        monkeypatch.setattr(sys, "argv", ["backfill_realized_checks.py"])
+
+        kline = {days[i]: 20.0 + i for i in range(6)}
+        calls = []
+
+        def fake_load(sym):
+            calls.append(sym)
+            return dict(kline)
+
+        monkeypatch.setattr(brc, "load_kline_map", fake_load)
+
+        brc.main()   # 修复前: sorted({2, '000002'}) → TypeError, 整批回填中断
+
+        assert calls == ["000002"]                            # 同一标的只拉一次
+        stocks = json.loads(calib.read_text(encoding="utf-8"))["daily_records"][0]["stocks"]
+        for s in stocks:
+            assert s["realized_checked"] is True
+            assert abs(s["realized_return"] - (25.0 - 20.0) / 20.0) < 1e-15
 
 
 class TestCircuitBreaker:
