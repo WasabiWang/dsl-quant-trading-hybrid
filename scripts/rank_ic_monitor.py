@@ -28,6 +28,7 @@ sys.path.insert(0, PROJECT_ROOT)
 CALIB_PATH = os.path.join(PROJECT_ROOT, "confidence_data", "prediction_calibration.json")
 IC_PATH = os.path.join(PROJECT_ROOT, "confidence_data", "rank_ic_series.json")
 KLINES_DIR = os.path.join(PROJECT_ROOT, "data", "cache", "ic_kline")
+KLINE_CACHE_TTL_HOURS = 12  # P1: 缓存最长复用时长; 超过即刷新(配合"是否含最近已收盘交易日"判断)
 
 # IC 计算参数
 MIN_N = 10          # 单日截面最少样本数 (QuantMind 同款)
@@ -107,15 +108,39 @@ def fetch_kline(symbol: str):
     return m or None
 
 
+def _is_trading_day(d) -> bool:
+    try:
+        from config.holiday_calendar import is_trading_day
+        return bool(is_trading_day(check_date=d))
+    except Exception:
+        return d.weekday() < 5
+
+
+def _latest_expected_session(now=None) -> str:
+    """最近一个已收盘交易日 (yyyy-MM-dd); 用于判断K线缓存是否已含最新收盘价。
+    15:00 前视为上一交易日, 并向前跳过周末/节假日。"""
+    now = now or datetime.now()
+    d = now.date() if now.hour >= 15 else now.date() - timedelta(days=1)
+    limit = d - timedelta(days=31)
+    while d > limit:
+        if _is_trading_day(d):
+            return d.strftime("%Y-%m-%d")
+        d = d - timedelta(days=1)
+    return None
+
+
 def get_kline_map(symbol: str, force: bool = False):
-    """缓存优先; 缓存超过2天自动刷新(保证新交易日收盘价及时入库)。"""
+    """缓存优先; 缓存不含最近已收盘交易日或超过 TTL 时自动刷新(保证新交易日收盘价及时入库)。"""
     p = os.path.join(KLINES_DIR, f"{symbol}.json")
     if not force and os.path.exists(p):
         age_h = (time.time() - os.path.getmtime(p)) / 3600
-        if age_h < 48:
+        if age_h < KLINE_CACHE_TTL_HOURS:
             cached = load_kline_cached(symbol)
             if cached:
-                return cached
+                expected = _latest_expected_session()
+                latest = max(cached.keys()) if cached else None
+                if expected is None or (latest and latest >= expected):
+                    return cached
     m = fetch_kline(symbol)
     if m:
         save_kline_cached(symbol, m)
@@ -192,6 +217,8 @@ def fill_realized(cal: dict, kline_maps: dict, trading_days: set, dry_run: bool)
             target_day = sorted_days[hd]
             if target_day > today.strftime("%Y-%m-%d"):
                 continue  # 未来日期不可用
+            if target_day not in km:
+                continue  # P1: 该标的兑现日缺价(停牌/缓存不完整) → 跳过, 不中断整批回填
             pred_close = km[dr["date"]]
             future_close = km[target_day]
             actual = (future_close - pred_close) / pred_close
@@ -222,8 +249,10 @@ import numpy as np
 import pandas as pd
 
 
-def compute_ic_series(cal: dict, thresholds: dict) -> list:
-    """按日期截面计算 (5d horizon) IC 序列。每行带 model_version/model_family。"""
+def compute_ic_series(cal: dict, thresholds: dict, mature_cutoff_date: str = None) -> list:
+    """按日期截面计算 (5d horizon) IC 序列。每行带 model_version/model_family/mature。
+    P1: 样本不足或覆盖率偏低的截面仍保留记录(仅 rank_ic/ic 置空), 避免最严重的数据缺失
+    被整日丢弃而无法触发覆盖率告警; mature 标记该截面兑现窗口是否已过。"""
     rows = []
     for dr in cal.get("daily_records", []):
         date = dr["date"]
@@ -242,12 +271,13 @@ def compute_ic_series(cal: dict, thresholds: dict) -> list:
             if rr is not None and np.isfinite(rr):
                 preds.append(float(pr))
                 reals.append(float(rr))
-        if total == 0 or len(preds) < thresholds["min_n"]:
+        if total == 0:
             continue
-        rank_ic = _spearman(preds, reals)
-        ic = float(np.corrcoef(preds, reals)[0, 1]) if len(preds) >= 3 else float("nan")
-        if not np.isfinite(rank_ic):
-            continue
+        rank_ic = float("nan")
+        ic = float("nan")
+        if len(preds) >= thresholds["min_n"]:
+            rank_ic = _spearman(preds, reals)
+            ic = float(np.corrcoef(preds, reals)[0, 1]) if len(preds) >= 3 else float("nan")
         rows.append({
             "date": date,
             "model_version": model_version,
@@ -255,7 +285,8 @@ def compute_ic_series(cal: dict, thresholds: dict) -> list:
             "n": len(preds),
             "total_5d": total,
             "coverage": round(len(preds) / total, 4),
-            "rank_ic": round(rank_ic, 4),
+            "mature": bool(mature_cutoff_date and date <= mature_cutoff_date),
+            "rank_ic": round(rank_ic, 4) if np.isfinite(rank_ic) else None,
             "ic": round(ic, 4) if np.isfinite(ic) else None,
         })
     rows.sort(key=lambda r: r["date"])
@@ -291,7 +322,8 @@ def compute_quality_summary(series: list, thresholds: dict) -> dict:
     """移植 QuantMind get_model_quality 质量判定 (仅质量层, 不含新鲜度/成熟度)。
     显式接收已筛选的 series, 不再隐式用全历史代表当前模型。"""
     rics = [r["rank_ic"] for r in series if r.get("rank_ic") is not None]
-    covs = [r["coverage"] for r in series if r.get("coverage") is not None]
+    covs = [r["coverage"] for r in series
+            if r.get("coverage") is not None and r.get("mature", True)]
     status, reasons = "healthy", []
     recent_mean = None
     if rics:
@@ -363,7 +395,10 @@ def classify_current_status(recent_mean, n_days, lag_trading_days, coverage,
         return {"evaluation_status": "data_issue", "actionable": False}
     if not n_days:
         return {"evaluation_status": "insufficient_data", "actionable": False}
-    if lag_trading_days is not None and lag_trading_days > max_lag_sessions:
+    if lag_trading_days is None:
+        # 成熟截止日/交易日滞后不可计算 → 成熟度无法验证, 不得判定 healthy
+        return {"evaluation_status": "insufficient_data", "actionable": False}
+    if lag_trading_days > max_lag_sessions:
         return {"evaluation_status": "stale", "actionable": False}
     if n_days < min_status_days:
         return {"evaluation_status": "insufficient_data", "actionable": False}
@@ -466,7 +501,8 @@ def assess_evaluation_readiness(rows, daily_records, family, mature_cutoff_date,
     min_status_days = int(thresholds.get("min_status_days", 10))
     max_lag_sessions = int(thresholds.get("max_lag_sessions", 2))
 
-    n_mature_days = len(rows)
+    valid_rows = [r for r in rows if r.get("rank_ic") is not None]
+    n_mature_days = len({r["date"] for r in valid_rows})
     last_obs_date = max(r["date"] for r in rows) if rows else None
     coverage = min(r.get("coverage", 1.0) for r in rows[-10:]) if rows else None
     lag_trading_days = trading_session_lag(last_obs_date, mature_cutoff_date, trading_days)
@@ -480,9 +516,9 @@ def assess_evaluation_readiness(rows, daily_records, family, mature_cutoff_date,
     evaluation_status = classified["evaluation_status"]
     actionable = classified["actionable"]
 
-    if not rows:
+    if not rows or lag_trading_days is None:
         freshness_status = "unknown"
-    elif lag_trading_days is not None and lag_trading_days > max_lag_sessions:
+    elif lag_trading_days > max_lag_sessions:
         freshness_status = "stale"
     else:
         freshness_status = "fresh"
@@ -521,11 +557,13 @@ def build_status_payload(series, daily_records, current_version, mature_cutoff_d
     if as_of_date is None:
         as_of_date = datetime.now().strftime("%Y-%m-%d")
     family = normalize_model_family(current_version)
-    current_rows = [r for r in series if r.get("model_family") == family]
+    # P1: 只保留已成熟(兑现窗口已过)的截面参与当前族评估, 避免未到期记录虚增成熟日
+    mature_series = [r for r in series if r.get("mature", True)]
+    current_rows = [r for r in mature_series if r.get("model_family") == family]
 
     hist_quality = compute_quality_summary(series, thresholds)
-    hist_last = series[-1]["date"] if series else None
-    hist_window = series[-RECENT_WINDOW:] if series else []
+    hist_last = mature_series[-1]["date"] if mature_series else None
+    hist_window = mature_series[-RECENT_WINDOW:] if mature_series else []
     historical = {
         "quality_status": hist_quality["quality_status"],
         "freshness_status": "stale" if (hist_last and mature_cutoff_date and hist_last < mature_cutoff_date) else "fresh",
@@ -535,7 +573,7 @@ def build_status_payload(series, daily_records, current_version, mature_cutoff_d
         "recent_mean": hist_quality["recent_mean"],
         "rank_ic_mean": hist_quality["rank_ic_mean"],
         "rank_icir_30d": hist_quality["rank_icir_30d"],
-        "n_mature_days": len(hist_window),
+        "n_mature_days": len({r["date"] for r in hist_window}),
         "quality_reasons": hist_quality["quality_reasons"],
     }
 
@@ -623,13 +661,15 @@ def main():
     filled = fill_realized(cal, kline_maps, trading_days, args.dry_run)
     print(f"回填 realized_return: +{filled} 条")
 
-    # 计算 IC 序列
-    series = compute_ic_series(cal, thresholds)
-    print(f"IC 序列: {len(series)} 天")
+    # 计算 IC 序列 (先确定成熟截止日, 供成熟度标记)
+    mature_cutoff_date = mature_cutoff(trading_days, horizon=5)
+    series = compute_ic_series(cal, thresholds, mature_cutoff_date)
+    print(f"IC 序列: {len(series)} 天 (成熟截止日 {mature_cutoff_date})")
     if series:
         print(f"  范围: {series[0]['date']} -> {series[-1]['date']}")
-        rics = [r["rank_ic"] for r in series]
-        print(f"  rank_ic: mean={np.mean(rics):.4f} | median={np.median(rics):.4f} | std={np.std(rics):.4f} | min={min(rics):.4f} | max={max(rics):.4f}")
+        rics = [r["rank_ic"] for r in series if r["rank_ic"] is not None]
+        if rics:
+            print(f"  rank_ic: mean={np.mean(rics):.4f} | median={np.median(rics):.4f} | std={np.std(rics):.4f} | min={min(rics):.4f} | max={max(rics):.4f}")
         n_per_day = [r["n"] for r in series]
         print(f"  n/day: mean={np.mean(n_per_day):.1f} | min={min(n_per_day)} | max={max(n_per_day)}")
 
@@ -645,7 +685,6 @@ def main():
     # v4.7.5: 三层状态契约
     daily_records = cal.get("daily_records", [])
     current_version = _resolve_current_version(daily_records)
-    mature_cutoff_date = mature_cutoff(trading_days, horizon=5)
     payload = build_status_payload(
         series=series, daily_records=daily_records, current_version=current_version,
         mature_cutoff_date=mature_cutoff_date, trading_days=trading_days,

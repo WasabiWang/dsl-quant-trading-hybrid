@@ -119,7 +119,8 @@ def test_fill_realized_idempotent():
     assert filled == 1
 
 
-def test_compute_ic_series_min_n():
+def test_compute_ic_series_retains_low_sample_day_with_null_ic():
+    """P1: 样本不足的截面必须保留(仅 IC 置空), 否则数据缺失会被整日隐藏。"""
     cal = {"daily_records": [{
         "date": "2026-01-10",
         "stocks": [{"symbol": s, "predicted_return": float(i), "horizon": "5d",
@@ -128,8 +129,41 @@ def test_compute_ic_series_min_n():
                                           "000006", "000007", "000008", "000009"])],
     }]}
     th = dict(rim.DEFAULT_THRESHOLDS)
-    series = rim.compute_ic_series(cal, th)
-    assert series == []  # 9 < min_n=10
+    series = rim.compute_ic_series(cal, th, "2026-01-10")
+    assert len(series) == 1                 # 不再整日丢弃
+    assert series[0]["rank_ic"] is None     # 9 < min_n=10 → IC 置空
+    assert series[0]["coverage"] == 1.0
+    assert series[0]["mature"] is True
+
+
+def test_compute_ic_series_exposes_low_coverage_anomaly():
+    """P1: 25 预测仅 9 条兑现 → coverage 0.36 必须可见并触发 data_issue。"""
+    stocks = []
+    for i in range(25):
+        s = {"symbol": f"{i:06d}", "predicted_return": float(i), "horizon": "5d"}
+        if i < 9:
+            s["realized_return"] = float(i) * 0.5
+        stocks.append(s)
+    cal = {"daily_records": [{"date": "2026-01-10", "stocks": stocks}]}
+    th = dict(rim.DEFAULT_THRESHOLDS)
+    series = rim.compute_ic_series(cal, th, "2026-01-10")
+    assert series[0]["coverage"] == round(9 / 25, 4)
+    assert rim.compute_quality_summary(series, th)["quality_status"] == "data_issue"
+
+
+def test_fill_realized_skips_missing_target_day():
+    """P1: 兑现日不在该标的K线中时跳过, 不得 KeyError 中断整批回填。"""
+    cal = {"daily_records": [{
+        "date": "2026-01-10",
+        "stocks": [{"symbol": "000002", "predicted_return": 0.01, "horizon": "5d"}],
+    }]}
+    kline_maps = {"000002": {"2026-01-10": 10.0, "2026-01-12": 11.0, "2026-01-13": 12.0,
+                             "2026-01-14": 13.0, "2026-01-15": 14.0}}
+    trading_days = {"2026-01-10", "2026-01-12", "2026-01-13",
+                    "2026-01-14", "2026-01-15", "2026-01-16"}
+    filled = rim.fill_realized(cal, kline_maps, trading_days, dry_run=True)
+    assert filled == 0
+    assert cal["daily_records"][0]["stocks"][0].get("realized_return") is None
 
 
 if __name__ == "__main__":

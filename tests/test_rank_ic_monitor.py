@@ -171,6 +171,42 @@ def test_shadow_critical_when_below_critical_mean():
     assert rim.shadow_quality_status(hac, THRESHOLDS) == "critical"
 
 
+# ── P1 修复回归 ────────────────────────────────────────────────────────────
+
+def test_unverifiable_maturity_is_not_healthy():
+    """P1: 成熟截止日不可计算(滞后为 None)时不得判定 healthy/actionable。"""
+    result = rim.classify_current_status(
+        recent_mean=0.10, n_days=20, lag_trading_days=None, coverage=1.0,
+        thresholds=THRESHOLDS,
+    )
+    assert result["evaluation_status"] == "insufficient_data"
+    assert result["actionable"] is False
+
+
+def test_immature_rows_excluded_from_current_family():
+    """P1: 未成熟截面(兑现窗口未过)不得计入当前族成熟日, 其 coverage=0 也不得污染覆盖率。"""
+    series = [
+        {"date": "2026-09-01", "model_family": "v4.7", "rank_ic": 0.10,
+         "coverage": 1.0, "n": 24, "mature": True},
+        {"date": "2026-09-11", "model_family": "v4.7", "rank_ic": None,
+         "coverage": 0.0, "n": 0, "mature": False},
+    ]
+    result = rim.build_status_payload(series, [], "v4.7.4", "2026-09-01",
+                                      trading_days=[], thresholds=THRESHOLDS)
+    assert result["current_summary"]["n_mature_days"] == 1
+    assert result["current_summary"]["evaluation_status"] == "insufficient_data"
+
+
+def test_duplicate_dates_do_not_inflate_mature_days():
+    """P1: 成熟日按唯一交易日期计数, 重复日期不得虚增。"""
+    row = {"model_family": "v4.7", "rank_ic": 0.10, "coverage": 1.0, "n": 24}
+    series = [dict(row, date="2026-09-01"), dict(row, date="2026-09-01"),
+              dict(row, date="2026-09-02")]
+    result = rim.build_status_payload(series, [], "v4.7.4", "2026-09-02",
+                                      trading_days=[], thresholds=THRESHOLDS)
+    assert result["current_summary"]["n_mature_days"] == 2
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0
