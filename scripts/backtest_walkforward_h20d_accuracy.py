@@ -348,13 +348,17 @@ def main():
 
     snapshot_symbols, snap_meta = resolve_universe("snapshot")
     pit_symbols, pit_meta = resolve_universe("point_in_time", backtest_days, args.pit_file)
+    # 隶属区间: **只用于 point_in_time 宇宙**；snapshot 基线绝不能被它过滤。
+    # (2026-09-13 修复 Astra 复核发现的 bug: both 模式下两组曾共用过滤,
+    #  导致 snapshot 的 50.02% 实为「当前池代码 ∩ PIT 成员日」的混合样本)
+    global PIT_MEMBERSHIP, PRED_DUMP
+    pit_intervals = {}
     if args.universe in ("point_in_time", "both"):
-        global PIT_MEMBERSHIP, PRED_DUMP
-        PIT_MEMBERSHIP, _ = build_pit_intervals(
+        pit_intervals, _ = build_pit_intervals(
             load_pit_universe(args.pit_file), pit_meta["window_start"])
         if args.dump_predictions:
             PRED_DUMP = {}
-        print(f"   时点隶属区间: {len(PIT_MEMBERSHIP)} 只 (窗口起点 {pit_meta['window_start']})")
+        print(f"   时点隶属区间: {len(pit_intervals)} 只 (窗口起点 {pit_meta['window_start']})")
 
     names = {}
     for s in snapshot_symbols + pit_symbols:
@@ -396,7 +400,9 @@ def main():
     }
 
     for label, symbols, meta in universes:
-        print(f"\n▶ 运行 {label} 宇宙 ({len(symbols)}只)...")
+        # 过滤开关: **仅 point_in_time 生效**（snapshot 为前视基线, 必须不过滤）
+        PIT_MEMBERSHIP = pit_intervals if label == "point_in_time" else None
+        print(f"\n▶ 运行 {label} 宇宙 ({len(symbols)}只, PIT过滤={'开' if PIT_MEMBERSHIP else '关'})...")
         results, elapsed = run_universe(symbols, names, backtest_days, args.adjust, drop_fund)
         summ = _summarize(results, label, elapsed)
         output["per_universe"][label] = {"summary": summ, "per_stock": results}
