@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -241,6 +242,16 @@ def _patch_dashboard_adapter_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(data_adapter, "MODELS_DIR", str(project_root / "models"))
     monkeypatch.setattr(data_adapter, "LOGS_DIR", str(project_root / "logs"))
 
+    # v4.6.3: _build_pipeline_tasks 优先调 `openclaw cron list --json` (Tier-1 实时源),
+    # 本地 ~/.openclaw/cron/jobs.json 只是 Tier-2 fallback。测试必须让 Tier-1 失败,
+    # 否则会读到真实 cron 而绕过 fixture (导致 tasks[0] 不是被测任务)。
+    class _NoLiveCron:
+        returncode = 127
+        stdout = ""
+        stderr = "test: live cron source disabled"
+
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: _NoLiveCron())
+
     original_expanduser = data_adapter.os.path.expanduser
 
     def fake_expanduser(path):
@@ -264,7 +275,8 @@ def _patch_dashboard_adapter_paths(monkeypatch, tmp_path):
 def _write_cron_fixture(root: Path, job: dict, state: dict):
     cron_dir = root / "openclaw" / "cron"
     cron_dir.mkdir(parents=True, exist_ok=True)
-    _write_json(cron_dir / "jobs.json", {"jobs": [job]})
+    # 线上 jobs.json / Tier-1 CLI 都把运行态内嵌在 job["state"], 适配器读该字段
+    _write_json(cron_dir / "jobs.json", {"jobs": [{**job, "state": state}]})
     _write_json(cron_dir / "jobs-state.json", {"jobs": {job["id"]: {"state": state}}})
 
 

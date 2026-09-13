@@ -20,19 +20,36 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def test_h5d_signal_weight_is_continuous():
-    from scripts.batch_predict import compute_h5d_signal
+    from scripts import batch_predict as bp
 
-    r = compute_h5d_signal(0.008, 0.48)
+    # v4.6.9f P1-2 双门槛: 方向精度≥min_accuracy 且 |预测收益|≥min_return 才允许buy/sell
+    # (阈值可从 config/adaptive_params.yaml 的 signal 段覆盖, 默认 0.55 / 0.01)
+    min_acc, min_ret = 0.55, 0.01
+    try:
+        with open(os.path.join(bp.PROJECT_ROOT, "config", "adaptive_params.yaml"), encoding="utf-8") as _f:
+            _sig = (yaml.safe_load(_f) or {}).get("signal") or {}
+        min_acc = float(_sig.get("min_accuracy", min_acc))
+        min_ret = float(_sig.get("min_return", min_ret))
+    except Exception:
+        pass
+
+    _ret = max(0.025, min_ret * 2)
+    _acc = min_acc + 0.05
+
+    r = bp.compute_h5d_signal(_ret, _acc)
     assert r["signal"] == "buy"
     assert r["signal_weight"] > 0.3
-    assert abs(r["confidence"] - 0.48) < 0.001
+    assert abs(r["confidence"] - _acc) < 0.001
 
-    low = compute_h5d_signal(0.008, 0.449)
-    high = compute_h5d_signal(0.008, 0.451)
+    # signal_weight 在精度门槛附近连续（无阶跃断裂）
+    low = bp.compute_h5d_signal(0.008, 0.449)
+    high = bp.compute_h5d_signal(0.008, 0.451)
     assert abs(high["signal_weight"] - low["signal_weight"]) < 0.02
 
-    assert compute_h5d_signal(0.025, 0.38)["signal"] == "buy"
-    assert compute_h5d_signal(0.0003, 0.30)["signal"] == "hold"
+    # 精度不达门槛 → hold
+    assert bp.compute_h5d_signal(_ret, min_acc - 0.05)["signal"] == "hold"
+    # 收益幅度不达门槛 → hold
+    assert bp.compute_h5d_signal(min_ret / 2, _acc)["signal"] == "hold"
 
 
 def test_risk_manager_stop_loss_and_trailing_thresholds(monkeypatch):
@@ -89,7 +106,8 @@ def test_broker_market_data_and_config_imports():
     with open(PROJECT_ROOT / "config" / "adaptive_params.yaml", encoding="utf-8") as f:
         adaptive = yaml.safe_load(f)
     assert "trading" in adaptive
-    assert "slippage" in adaptive.get("trading", {})
+    # 当前口径: 仓位/入场阈值参数 (slippage 段可选 — paper_trader/backtest 均以默认值容忍缺失)
+    assert {"position_size", "max_positions", "buy_threshold"} <= set(adaptive.get("trading", {}))
 
 
 def test_reconciliation_engine_uses_isolated_sqlite(monkeypatch, tmp_path):

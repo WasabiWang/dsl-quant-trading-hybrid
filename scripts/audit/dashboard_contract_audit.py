@@ -20,7 +20,9 @@ from urllib.parse import urlparse
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-STATIC_INDEX = PROJECT_ROOT / "web_dashboard" / "static" / "index.html"
+STATIC_DIR = PROJECT_ROOT / "web_dashboard" / "static"
+STATIC_INDEX = STATIC_DIR / "index.html"
+STATIC_JS_GLOB = "*.js"
 DATA_DIR = PROJECT_ROOT / "data"
 
 TAB_CONTRACTS = {
@@ -73,6 +75,7 @@ FETCH_CONTRACT_PREFIXES = {
     "/api/paper-trader": "read",
     "/api/pipeline": "read",
     "/api/task-reports/": "read",
+    "/api/rank-ic": "read",
     "/api/retrain-status": "read",
     "/api/accuracy-trend": "read",
     "/api/cron/trigger/": "mutation",
@@ -107,8 +110,19 @@ class DashboardContractAudit:
         return self.summary()
 
     @staticmethod
-    def _read_index() -> str:
-        return STATIC_INDEX.read_text(encoding="utf-8")
+    def _read_frontend_source() -> str:
+        """v4.6.6+: 前端已拆分为 index.html + static/*.js。
+
+        只看 index.html 会在 JS 外置后让 fetch 合约扫描静默退化为空检查,
+        因此合并全部静态资源文本再抽取 tab/fetch。
+        """
+        parts = []
+        if STATIC_INDEX.is_file():
+            parts.append(STATIC_INDEX.read_text(encoding="utf-8"))
+        if STATIC_DIR.is_dir():
+            for js in sorted(STATIC_DIR.glob(STATIC_JS_GLOB)):
+                parts.append(js.read_text(encoding="utf-8"))
+        return "\n".join(parts)
 
     @staticmethod
     def _path_exists(data, dotted: str) -> bool:
@@ -135,7 +149,7 @@ class DashboardContractAudit:
 
     def check_static_frontend_contract(self):
         """Validate every declared Dashboard tab and fetch endpoint has a contract."""
-        html = self._read_index()
+        html = self._read_frontend_source()
         tabs = sorted({
             tab for tab in re.findall(r'data-tab="([^"]+)"', html)
             if re.fullmatch(r"[a-z0-9-]+", tab)
