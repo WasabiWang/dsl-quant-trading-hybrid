@@ -420,8 +420,12 @@ class CalibrationFeedback:
                     horizon_days = 1
                 if horizon_days < 1:
                     horizon_days = 1
-                
-                if days_elapsed < horizon_days:
+
+                # v4.7.6: 资格门槛从"自然日≥horizon"改为保守的交易日→自然日估算(5交易日≈7自然日),
+                # 避免为必然未到期的记录白拉一次网络K线。
+                # 真正的"是否已满整窗口"权威判定在 _calc_return_from_df(按K线行序, 不足即 None)。
+                min_calendar_days = -(-horizon_days * 7 // 5)  # ceil(horizon * 1.4)
+                if days_elapsed < min_calendar_days:
                     continue
                 
                 try:
@@ -491,69 +495,100 @@ class CalibrationFeedback:
         v4.6.9i(审计F1-5): 主源换麦蕊 get_kline_history(前复权f) — akshare stock_zh_a_hist(东财push2his)
         实测封锁(2026-08-14), 原实现会让校准闭环全灭; akshare仅作降级。
         v4.7.6(审计遗留§4): 修复麦蕊列名未映射(t/o/h/l/c → date/close)导致恒 None,
-        并让主源任一失败路径(异常/空数据/窗口外)真正回落 akshare 降级链。
+        并让主源任一失败路径(异常/空数据/窗口外)真正回落降级链。
+        v4.7.6(段2): 降级链补 mootdx(通达信, TCP 直连不封 IP); 各源统一走 _normalize_kline_df,
+        避免"降级源存在但形同虚设"(本机 akshare 东财源实测 ProxyError 仍封锁)。
         """
         from datetime import timedelta
         start = (pred_date - timedelta(days=5)).strftime("%Y%m%d")
         end = (pred_date + timedelta(days=horizon_days * 3)).strftime("%Y%m%d")
 
+        def _try(df):
+            df = self._normalize_kline_df(df)
+            if df is None:
+                return None
+            return self._calc_return_from_df(df, pred_date, horizon_days)
+
         # 主源: 麦蕊 (v4.7.6 修复)
         #   旧缺陷: 直接把 t/o/h/l/c 原始列交给只认 close/收盘 的 _calc_return_from_df
         #   → KeyError 被内层 except 吞掉 → 恒返回 None; 且该分支为 return(非抛错),
-        #   主源失败不会回落 akshare → check_realized_accuracy 空跑。
-        #   现: 列名映射对齐; 仅当算出非 None 收益时才 return, 否则继续降级链。
+        #   主源失败不会回落 → check_realized_accuracy 空跑。
         try:
             from config.mairui_api_config import get_kline_history
             rows = get_kline_history(symbol, period="d", adjust="f",
                                      start_date=start, end_date=end)
             if rows and isinstance(rows, list) and len(rows) >= 2:
                 import pandas as pd
-                df = pd.DataFrame(rows).rename(columns=MAIRUI_KLINE_COLUMNS)
-                if "date_raw" in df.columns:
-                    df["date"] = pd.to_datetime(df["date_raw"]).dt.date
-                    df = df.sort_values("date").reset_index(drop=True)
-                    ret = self._calc_return_from_df(df, pred_date, horizon_days)
-                    if ret is not None:
-                        return ret
+                ret = _try(pd.DataFrame(rows).rename(columns=MAIRUI_KLINE_COLUMNS))
+                if ret is not None:
+                    return ret
         except Exception:
             pass
 
-        # 降级: akshare(东财push2his, 曾封锁, 恢复后可自动生效)
-        try:
-            import akshare as ak
-            import pandas as pd
-            df = ak.stock_zh_a_hist(
-                symbol=symbol, period="daily",
-                start_date=start, end_date=end,
-                adjust="qfq"
-            )
-            if df is None or len(df) < 2:
-                return None
-            df["date"] = pd.to_datetime(df["日期"]).dt.date
-            return self._calc_return_from_df(df, pred_date, horizon_days)
-        except Exception:
+        # 降级链: akshare(东财 push2his, 本机实测 ProxyError 封锁) → mootdx(通达信 TCP 直连)
+        #   任一步算出非 None 即结束; 逐源失败不抛出, 交由上层按"未兑现"处理。
+        for loader in (self._load_akshare_daily, self._load_mootdx_daily):
+            try:
+                ret = _try(loader(symbol, start, end))
+                if ret is not None:
+                    return ret
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _normalize_kline_df(df):
+        """把各源K线规整为 _calc_return_from_df 需要的形状: 统一 `date` 列(datetime.date)。
+        麦蕊(date_raw/t) / akshare·东财(日期) / mootdx(日期) 口径由此收口。"""
+        if df is None or len(df) < 2:
             return None
+        import pandas as pd
+        d = df.copy()
+        date_col = next((c for c in ("date", "date_raw", "日期", "datetime", "t")
+                         if c in d.columns), None)
+        if date_col is None:
+            return None
+        d["date"] = pd.to_datetime(d[date_col], errors="coerce").dt.date
+        d = d[d["date"].notna()]
+        return d if len(d) >= 2 else None
+
+    @staticmethod
+    def _load_akshare_daily(symbol: str, start: str, end: str):
+        import akshare as ak
+        return ak.stock_zh_a_hist(symbol=symbol, period="daily",
+                                  start_date=start, end_date=end, adjust="qfq")
+
+    @staticmethod
+    def _load_mootdx_daily(symbol: str, start: str, end: str):
+        from common.mootdx_adapter import get_kline
+        return get_kline(symbol, start=start, end=end)
 
     def _calc_return_from_df(self, df, pred_date, horizon_days: int):
-        """从K线DataFrame计算预测窗口实际收益 (与旧逻辑一致)
+        """从K线DataFrame计算预测窗口实际收益
 
-        v4.7.6: 收盘价列按 CLOSE_COLUMN_CANDIDATES 解析(close/收盘/c),
-        适配麦蕊映射列与 akshare 中文列, 不再假设列名固定。
+        v4.7.6: ① 收盘价列按 CLOSE_COLUMN_CANDIDATES 解析(close/收盘/c);
+                ② 指标位一律按行序 —— 先 reset_index, 修正 akshare 分支未重置索引时
+                   `index[0]` 非位置值的问题;
+                ③ **必须有完整 horizon 个交易日的后续K线才结算**: 旧实现
+                   `min(horizon_days, len(df)-pred_idx-1)` 会在数据源尚未推进满窗口时
+                   静默截断, 用"不足 horizon 的窗口"冒充已兑现收益, 直接污染兑现精度/IC。
+                   不足即返回 None(视为未到期, 留待下轮)。
         """
         try:
             close_col = next((c for c in CLOSE_COLUMN_CANDIDATES if c in df.columns), None)
             if close_col is None or "date" not in df.columns:
                 return None
+            df = df.sort_values("date").reset_index(drop=True)
             pred_rows = df[df["date"] == pred_date]
             if len(pred_rows) == 0:
                 pred_rows = df[df["date"] < pred_date].tail(1)
                 if len(pred_rows) == 0:
                     return None
-            pred_idx = pred_rows.index[0]
+            pred_idx = int(pred_rows.index[0])
+            if len(df) - pred_idx - 1 < horizon_days:
+                return None  # 未满整窗口 → 不得用截断窗口结算
+            target_idx = pred_idx + horizon_days
             pred_close = float(df.loc[pred_idx, close_col])
-            target_idx = pred_idx + min(horizon_days, len(df) - pred_idx - 1)
-            if target_idx == pred_idx:
-                return None
             future_close = float(df.loc[target_idx, close_col])
             return (future_close - pred_close) / pred_close
         except Exception:

@@ -969,6 +969,60 @@ class TestMairuiActualReturnFallback:
         assert s["realized_checked"] is True
         assert s["realized_return"] == (c2 - c1) / c1     # 全精度, 未 round(4)
         assert round(s["realized_return"], 4) != s["realized_return"]
+
+    def test_calc_return_refuses_truncated_window(self):
+        """v4.7.6: 后续K线不足 horizon 个交易日时不得结算(旧实现 min() 静默截断,
+        会拿"不足 horizon 的窗口"冒充已兑现收益)。"""
+        import core.calibration_feedback as cfm
+
+        df = pd.DataFrame({"date": [date(2026, 9, 1), date(2026, 9, 2), date(2026, 9, 3)],
+                           "收盘": [10.0, 11.0, 12.0]})
+        eng = cfm.CalibrationFeedback()
+        assert eng._calc_return_from_df(df, date(2026, 9, 1), 5) is None   # 后续仅2个交易日
+        assert abs(eng._calc_return_from_df(df, date(2026, 9, 1), 2) - 0.2) < 1e-12
+
+    def test_calc_return_index_is_positional(self):
+        """v4.7.6: index[0] 必须按位置而非标签(akshare 分支此前未 reset_index)。"""
+        import core.calibration_feedback as cfm
+
+        df = pd.DataFrame({"date": [date(2026, 9, 1), date(2026, 9, 2), date(2026, 9, 3)],
+                           "close": [10.0, 11.0, 12.0]}, index=[7, 8, 9])
+        eng = cfm.CalibrationFeedback()
+        assert abs(eng._calc_return_from_df(df, date(2026, 9, 1), 2) - 0.2) < 1e-12
+
+    def test_normalize_kline_df_maps_chinese_date(self):
+        """v4.7.6: 各源K线列口径收口(日期→date; close/收盘/c 均可)。"""
+        import core.calibration_feedback as cfm
+
+        out = cfm.CalibrationFeedback._normalize_kline_df(
+            pd.DataFrame({"日期": ["2026-09-01", "2026-09-02"], "收盘": [10.0, 12.5]}))
+        assert list(out["date"]) == [date(2026, 9, 1), date(2026, 9, 2)]
+        assert cfm.CalibrationFeedback._normalize_kline_df(pd.DataFrame({"x": [1, 2]})) is None
+
+    def test_falls_back_to_mootdx_when_akshare_unavailable(self, monkeypatch):
+        """v4.7.6: 麦蕊空 + akshare 东财源封锁 → 真实降级到 mootdx(通达信), 而非静默 None。"""
+        import core.calibration_feedback as cfm
+
+        monkeypatch.setattr("config.mairui_api_config.get_kline_history", lambda *a, **k: [])
+
+        def _akshare_down(**_kwargs):
+            raise RuntimeError("eastmoney push2his blocked (ProxyError)")
+        monkeypatch.setattr("akshare.stock_zh_a_hist", _akshare_down)
+
+        calls = {"n": 0}
+
+        def _fake_mootdx(symbol, start=None, end=None, period="daily"):
+            calls["n"] += 1
+            return pd.DataFrame({"日期": ["2026-09-01", "2026-09-02"],
+                                 "收盘": [10.0, 12.5]})
+        monkeypatch.setattr("common.mootdx_adapter.get_kline", _fake_mootdx)
+
+        eng = cfm.CalibrationFeedback()
+        ret = eng._fetch_actual_return("600519", date(2026, 9, 1), 1)
+        assert calls["n"] == 1
+        assert ret is not None and abs(ret - 0.25) < 1e-12
+
+
 class TestBackfillRealizedChecksGuards:
     """L0.x: backfill_realized_checks 与 rank_ic_monitor.fill_realized 同口径。
 
