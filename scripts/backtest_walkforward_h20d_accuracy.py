@@ -44,6 +44,11 @@ MIN_OOS_PREDICTIONS = 50  # 每只至少 50 次 OOS 预测才计入
 TIMEOUT_GLOBAL = 1200     # 全局超时秒数
 MAX_WORKERS = 3           # 并行线程数
 
+# ====== FX-1b (阶段1-B 步骤4): 规则化时点宇宙 ======
+PIT_PATH = os.path.join(PROJECT_ROOT, "data", "universe_pit.json")
+PIT_MEMBERSHIP = None     # {code: [(start,end),...]}; point_in_time 模式下启用
+# ================================
+
 # ====== FX-1: 池成分时间线 (从可得快照重建) ======
 # 快照来源 (文件 mtime) + 每股 pool_updated_at 字段。
 # 关键事实: master_stock_pool 系列快照最早只到 2026-08-25 (及 .bak-20260825 内
@@ -75,14 +80,59 @@ def build_universe_timeline() -> dict:
     return timeline
 
 
-def resolve_universe(mode: str) -> tuple:
+def load_pit_universe(path: str = None) -> dict:
+    """读 data/universe_pit.json → {rebalance_date: [codes]}。"""
+    p = path or PIT_PATH
+    if not os.path.exists(p):
+        raise RuntimeError(f"时点宇宙文件不存在: {p} — 先跑 scripts/build_pointintime_universe.py")
+    with open(p, encoding="utf-8") as f:
+        return (json.load(f).get("rebalance_dates") or {})
+
+
+def _prev_day(d: str) -> str:
+    return (datetime.strptime(d, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def build_pit_intervals(rd: dict, window_start: str) -> tuple:
+    """由时点宇宙序列构造 {code: [(start,end), ...]} 隶属区间 + 需评估的代码集合。
+
+    规则: 某码在再平衡日 t 入选 → 自 t 起生效, 至其下一次**未**入选的再平衡日为止。
+    窗口所需期 = 窗口起点前的最后一期(定义窗口起点隶属) + 窗口内的全部期。
+    """
+    ts = sorted(rd)
+    before = [t for t in ts if t < window_start]
+    inside = [t for t in ts if t >= window_start]
+    periods = ([before[-1]] if before else []) + inside
+    if not periods:
+        return {}, []
+    intervals: dict = {}
+    for i, t in enumerate(periods):
+        nxt = periods[i + 1] if i + 1 < len(periods) else None
+        end = "9999-12-31" if nxt is None else _prev_day(nxt)
+        for c in rd.get(t, []):
+            intervals.setdefault(c, []).append((t, end))
+    return intervals, sorted(intervals)
+
+
+def _in_pit(code: str, ts) -> bool:
+    """预测日是否落在该码的时点宇宙隶属区间内 (point_in_time 模式启用)。"""
+    if PIT_MEMBERSHIP is None:
+        return True
+    ivs = PIT_MEMBERSHIP.get(code)
+    if not ivs:
+        return False
+    d = ts.strftime("%Y-%m-%d") if hasattr(ts, "strftime") else str(ts)[:10]
+    return any(a <= d <= b for a, b in ivs)
+
+
+def resolve_universe(mode: str, backtest_days: int = 730, pit_file: str = None) -> tuple:
     """
     返回 (universe_symbols, meta_dict)。
-    - snapshot:       旧行为 → 当前 master_stock_pool.yaml
-    - point_in_time:  新默认 → 最早可得快照的成分 (标注回测起点宇宙不可考)
+    - snapshot:       旧行为 → 当前 master_stock_pool.yaml (前视选池, 仅作对照)
+    - point_in_time:  阶段1-B → 读 data/universe_pit.json (规则化时点宇宙 R1–R6, 无前视)
     """
-    timeline = build_universe_timeline()
     if mode == "snapshot":
+        timeline = build_universe_timeline()
         cur = timeline.get("2026-09-06", set())
         meta = {
             "mode": "snapshot",
@@ -91,22 +141,22 @@ def resolve_universe(mode: str) -> tuple:
             "note": "旧行为: 用当前池回测 730 天历史(前视选池)",
         }
         return sorted(cur), meta
-    # point_in_time (新默认): 最早可得快照
-    earliest_date = UNIVERSE_UNKNOWABLE_BEFORE
-    earliest = timeline.get(earliest_date, set())
+
+    rd = load_pit_universe(pit_file)
+    window_start = (datetime.now() - timedelta(days=backtest_days)).strftime("%Y-%m-%d")
+    intervals, codes = build_pit_intervals(rd, window_start)
     meta = {
         "mode": "point_in_time",
-        "snapshot_date": earliest_date,
-        "universe": sorted(earliest),
-        "note": (
-            f"新默认: 只用 {earliest_date} 当日已知成分。"
-            f"⚠️ 回测起点({datetime.now() - timedelta(days=730):%Y-%m-%d} 前后)宇宙不可考, "
-            f"本快照仍晚于回测起点, 因此差额是 {earliest_date}→2026-09-06 的 churn, "
-            f"非完整 730 天前视选池贡献(无法量化)。"
-        ),
-        "unknowable_before": UNIVERSE_UNKNOWABLE_BEFORE,
+        "source": pit_file or PIT_PATH,
+        "window_start": window_start,
+        "periods_in_window": len([t for t in sorted(rd) if t >= window_start]),
+        "universe_size": len(codes),
+        "note": ("阶段1-B: 宇宙来自规则化时点宇宙(R1–R6 预注册, 无前视选池); "
+                 "每笔预测按预测日与隶属区间过滤——非成员日的预测不计入。"),
+        "previous_behavior": ("旧实现用的是「最早可得快照(2026-08-25)」作代理, "
+                             "新实现直接读 data/universe_pit.json"),
     }
-    return sorted(earliest), meta
+    return codes, meta
 
 
 def evaluate_stock(code: str, name: str, backtest_days: int, adjust: str, drop_fund: bool) -> dict:
@@ -194,6 +244,8 @@ def evaluate_stock(code: str, name: str, backtest_days: int, adjust: str, drop_f
                     row = feats.loc[test_idx]
                     if pd.isna(row[tcol]):
                         continue
+                    if not _in_pit(code, test_idx):   # 阶段1-B: 非成员日的预测不计入
+                        continue
                     X_test = scaler.transform([row[fcols].values])
                     X_test_sel = selector.transform(X_test)
                     pred = float(model.predict(X_test_sel)[0])
@@ -276,13 +328,20 @@ def main():
                         help="drop=剔除fund_*(新默认, 无ann_date); keep=保留(旧行为)")
     parser.add_argument("--codes", nargs="*", default=None, help="仅评估指定代码(冒烟测试用)")
     parser.add_argument("--backtest-days", type=int, default=730, help="回测天数(默认730)")
+    parser.add_argument("--pit-file", default=None,
+                        help="时点宇宙 JSON (默认 data/universe_pit.json)")
     args = parser.parse_args()
 
     drop_fund = (args.fund == "drop")
     backtest_days = args.backtest_days
 
     snapshot_symbols, snap_meta = resolve_universe("snapshot")
-    pit_symbols, pit_meta = resolve_universe("point_in_time")
+    pit_symbols, pit_meta = resolve_universe("point_in_time", backtest_days, args.pit_file)
+    if args.universe in ("point_in_time", "both"):
+        global PIT_MEMBERSHIP
+        PIT_MEMBERSHIP, _ = build_pit_intervals(
+            load_pit_universe(args.pit_file), pit_meta["window_start"])
+        print(f"   时点隶属区间: {len(PIT_MEMBERSHIP)} 只 (窗口起点 {pit_meta['window_start']})")
 
     names = {}
     for s in snapshot_symbols + pit_symbols:
