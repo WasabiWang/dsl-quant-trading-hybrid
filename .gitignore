@@ -60,6 +60,9 @@ strategy_catalog.md
 *.pkl
 *.pkl.*
 
+# 模型权重 (2026-09-13: transformer权重不公开, 文件名暴露主池成分)
+models/**/*.pt
+
 # 数据库文件
 *.db
 *.db-*
@@ -78,6 +81,9 @@ data/simulation_state.json
 data/feedback_log.jsonl
 data/execution_log.jsonl
 confidence_data/*.json
+# 校准数据备份 (2026-09-13: 含标的明细/池成分, 不公开)
+confidence_data/*.bak-*
+confidence_data/*.pre-ic-backfill
 cache/price_*.json
 
 # 测试产物
